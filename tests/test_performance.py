@@ -4,13 +4,24 @@ import tempfile
 import threading
 import unittest
 import urllib.request
+import urllib.error
 
 from devflight import Queue
 from devflight.collector import make_server
+from devflight.collector import otlp_identity
 from devflight.rawtree import sync
 
 
 class PerformanceRegressionTests(unittest.TestCase):
+    def test_otlp_identity_only_when_unambiguous(self):
+        def resource(session):
+            return {"resource": {"attributes": [
+                {"key": "service.name", "value": {"stringValue": "codex"}},
+                {"key": "session.id", "value": {"stringValue": session}}]}}
+        identity = otlp_identity({"resourceLogs": [resource("a"), resource("b")]}, "resourceLogs")
+        self.assertEqual(identity["service.name"], "codex")
+        self.assertNotIn("session.id", identity)
+
     def test_five_concurrent_agents_durable(self):
         with tempfile.TemporaryDirectory() as home:
             queue = Queue(home)
@@ -53,6 +64,48 @@ class PerformanceRegressionTests(unittest.TestCase):
             self.assertEqual(remote.tables, [])
             self.assertEqual(remote.signals, ["/otlp/v1/traces"])
             self.assertEqual(queue.status()["pending"], 0)
+
+    def test_shutdown_requires_control_key(self):
+        with tempfile.TemporaryDirectory() as home:
+            server = make_server(Queue(home), 0)
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/shutdown"
+                with self.assertRaises(urllib.error.HTTPError) as denied:
+                    urllib.request.urlopen(urllib.request.Request(url, data=b""))
+                self.assertEqual(denied.exception.code, 403)
+                with self.assertRaises(urllib.error.HTTPError) as denied:
+                    urllib.request.urlopen(urllib.request.Request(
+                        url, data=b"", headers={"X-DevFlight-Control": "wrong",
+                                               "Origin": "http://example.com"}))
+                self.assertEqual(denied.exception.code, 403)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_sync_cursor_survives_restart_without_acked_growth(self):
+        class Remote:
+            def __init__(self): self.tokens = set(); self.events = set()
+            def insert(self, table, rows, token):
+                if token not in self.tokens:
+                    self.events.update(e["event_id"] for e in rows)
+                    self.tokens.add(token)
+        with tempfile.TemporaryDirectory() as home:
+            from devflight import Trace
+            queue = Queue(home)
+            for i in range(205):
+                Trace(queue).emit("tool.result", {"number": i})
+            remote = Remote()
+            sync(queue, remote, attempts=1)
+            self.assertEqual(len(remote.events), 205)
+            self.assertEqual(queue.state()["acked"], [])
+            self.assertEqual(queue.state()["acked_sequence"], 205)
+            restarted = Queue(home)
+            self.assertFalse(restarted.has_pending())
+            Trace(restarted).emit("error", {"message": "later"}, "error")
+            sync(restarted, remote, attempts=1)
+            self.assertEqual(len(remote.events), 206)
 
 
 if __name__ == "__main__":

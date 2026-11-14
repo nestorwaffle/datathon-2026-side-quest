@@ -12,6 +12,18 @@ from .rawtree import sync
 
 LIMIT = 4 * 1024 * 1024
 
+def otlp_identity(body, field):
+    resources = body.get(field, [])
+    values = {}
+    for item in resources:
+        attrs = item.get("resource", {}).get("attributes", [])
+        found = {a.get("key"): next(iter(a.get("value", {}).values()), None)
+                 for a in attrs if isinstance(a, dict) and isinstance(a.get("value"), dict)}
+        for key in ("service.name", "gen_ai.system", "gen_ai.request.model", "session.id", "developer.id"):
+            if found.get(key) is not None:
+                values.setdefault(key, set()).add(str(found[key]))
+    return {k: next(iter(v)) for k, v in values.items() if len(v) == 1}
+
 def make_server(queue, port=8787):
     slots = threading.BoundedSemaphore(32)
     control_path = queue.home / "control.key"
@@ -45,7 +57,7 @@ def make_server(queue, port=8787):
         def do_GET(self):
             if not self.authorized(): return self.reply(403, {"error": "Forbidden"})
             if self.path in ("/", "/health", "/status"):
-                return self.reply(200, {"service": "devflight-collector", **queue.status()})
+                return self.reply(200, {"service": "devflight-collector", "control_required": True, **queue.status()})
             self.reply(404, {"error": "Not found"})
 
         def do_POST(self):
@@ -104,6 +116,12 @@ def make_server(queue, port=8787):
                 if not isinstance(body.get(field),list): raise ValueError("Missing " + field)
                 # Preserve original resource attributes: a batch may contain multiple developers/sessions.
                 trace.agent["framework"] = "opentelemetry"
+                identity = otlp_identity(body, field)
+                provider = identity.get("gen_ai.system") or identity.get("service.name")
+                trace.agent["id"] = provider
+                trace.agent["model"] = identity.get("gen_ai.request.model")
+                trace.session_id = identity.get("session.id")
+                trace.developer_id = identity.get("developer.id")
                 trace.emit("otel."+signal,body)
                 self.reply(200,{})
             except (ValueError, TypeError, KeyError, OSError) as error:

@@ -95,9 +95,14 @@ def sync(queue, client=None, attempts=3):
                     for event in batch["events"]:
                         if event["event_type"].startswith("otel."):
                             signal = event["event_type"].split(".")[1]
-                            # Raw JSON remains in dev_events_raw; native transform builds signal tables.
+                            # Retries of the same OTLP payload share a remote identity,
+                            # including after a collector restart or exporter reconnect.
+                            payload_token = hashlib.sha256(
+                                json.dumps(event["data"], sort_keys=True, ensure_ascii=False,
+                                           separators=(",", ":")).encode("utf-8")
+                            ).hexdigest()
                             result = client.request("/otlp/v1/" + signal, event["data"],
-                                {"deduplicate_insert": "enable", "insert_deduplication_token": event["event_id"]},
+                                {"deduplicate_insert": "enable", "insert_deduplication_token": payload_token},
                                 {"x-rawtree-" + signal + "-table": "dev_" + signal})
                             if any(int(v) for k,v in result.get("partialSuccess", {}).items() if k.startswith("rejected")):
                                 raise RuntimeError("OTLP partial rejection")

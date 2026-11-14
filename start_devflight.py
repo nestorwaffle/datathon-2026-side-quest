@@ -102,11 +102,13 @@ def check_rawtree_read():
 def codex_overrides(port):
     # Single-quoted TOML strings avoid nested Windows cmd.exe quoting problems.
     base = f"http://127.0.0.1:{port}"
-    return [
+    overrides = [
         f"otel.exporter={{otlp-http={{endpoint='{base}/v1/logs',protocol='json'}}}}",
-        f"otel.trace_exporter={{otlp-http={{endpoint='{base}/v1/traces',protocol='json'}}}}",
         "otel.log_user_prompt=false",
     ]
+    if os.getenv("DEVFLIGHT_CAPTURE_PROFILE", "essential") in ("detailed", "debug"):
+        overrides.append(f"otel.trace_exporter={{otlp-http={{endpoint='{base}/v1/traces',protocol='json'}}}}")
+    return overrides
 
 
 def create_codex_launcher(port):
@@ -182,12 +184,16 @@ def show_status(port):
 
 def main():
     parser = argparse.ArgumentParser(description="DevFlight background telemetry service")
-    parser.add_argument("action", nargs="?", choices=("start", "stop", "status", "doctor"), default="start")
+    parser.add_argument("action", nargs="?", choices=("start", "stop", "status", "doctor", "integrations"), default="start")
     parser.add_argument("--status", action="store_true", help="Show queue and RawTree status without launching")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--with-codex", action="store_true", help="Open Codex with OTLP/JSON in a separate window")
+    parser.add_argument("--configure", choices=("codex", "gemini_cli", "qwen_code"),
+                        help="Propose a backed-up provider configuration, then request explicit approval")
     parser.add_argument("--only-collector", action="store_true", help="Do not open a Codex window")
     args = parser.parse_args()
+    if args.configure and args.action != "integrations":
+        parser.error("--configure is only valid with integrations")
     if args.with_codex and (args.action != "start" or args.only_collector or args.status):
         parser.error("--with-codex is only valid with start")
     if os.name != "nt":
@@ -200,13 +206,19 @@ def main():
             show_status(args.port)
             return 0
         if args.action == "stop":
-            if get_health(args.port) is None:
+            health = get_health(args.port)
+            if health is None:
                 print("[Collector] not running")
                 return 0
             headers = {}
             if os.environ.get("DEVFLIGHT_HTTP_TOKEN"):
                 headers["Authorization"] = "Bearer " + os.environ["DEVFLIGHT_HTTP_TOKEN"]
-            headers["X-DevFlight-Control"] = (QUEUE / "control.key").read_text(encoding="ascii").strip()
+            control_path = QUEUE / "control.key"
+            if control_path.exists():
+                headers["X-DevFlight-Control"] = control_path.read_text(encoding="ascii").strip()
+            elif health.get("control_required"):
+                raise RuntimeError("Collector requires a control key but control.key is missing; stop refused")
+            # Older local collectors had no control key; their /health lacks control_required.
             req = urllib.request.Request(f"http://127.0.0.1:{args.port}/shutdown", data=b"", headers=headers)
             with urllib.request.urlopen(req, timeout=3): pass
             for _ in range(20):
@@ -218,7 +230,15 @@ def main():
         if args.action == "doctor":
             show_status(args.port)
             check_rawtree_read()
-            print("[Integrations] Codex: configure OTLP in user config; Claude Code: configure OTEL environment for new sessions.")
+            from devflight.integrations import report
+            print("[Integrations] " + json.dumps(report(), ensure_ascii=False))
+            return 0
+        if args.action == "integrations":
+            from devflight.integrations import report, configure
+            from devflight import Queue
+            if args.configure:
+                print(json.dumps(configure(args.configure, args.port), ensure_ascii=False))
+            print(json.dumps(report(Queue(QUEUE)), ensure_ascii=False, indent=2))
             return 0
 
         # Validate the CLI before starting the collector, so errors are explicit.

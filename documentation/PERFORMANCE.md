@@ -10,6 +10,8 @@ Los sobres OTLP permanecen en la cola local para recuperación y deduplicación.
 
 Entorno: Windows, Python del entorno `.venv`, 15 noviembre 2026. Prueba sintética local de 200 eventos `tool.result`, sin red ni RawTree: después, 1,656 s de pared, 0,859 s de CPU, 131.582 bytes JSONL, 200 eventos útiles, 200 pendientes y cero pérdida observada. Línea base verificable: los 20 tests preexistentes pasaron en 2,841 s. No se capturó una medición numérica de 200 eventos antes del cambio; por ello no se declara una aceleración porcentual. La mejora de complejidad se verifica por el código y la regresión de concurrencia.
 
+Medición posterior del mismo caso sintético: 1,465 s de pared, 0,688 s de CPU y 131.582 bytes JSONL para 200 eventos. Son ejecuciones individuales con ruido del sistema, no una afirmación porcentual. La comprobación de cola dañada solo lee el último byte en el caso normal. El estado local usa el cursor durable y no recorre todos los eventos. La sincronización toma una instantánea por ciclo y conserva un manifiesto de lote para reintentos.
+
 Los 20 tests existentes y las pruebas añadidas cubren cinco clientes HTTP concurrentes, unicidad de secuencias, persistencia de 100 eventos y una sola ruta remota OTLP mediante un cliente simulado. La prueba remota de RawTree, sesiones reales de Codex con y sin telemetría, CPU/RAM y bytes de red de agentes reales quedan pendientes; no se generan filas de prueba en la cuenta remota. El resultado sintético no mide la latencia interactiva de Codex.
 
 ## Operación
