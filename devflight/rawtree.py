@@ -30,7 +30,8 @@ class RawTree:
             raise PermissionError("Read-only analyst client")
         # RawTree's dynamic JSON may reformat timestamps and omit null-valued paths.
         # Keep a lossless serialization alongside SQL-queryable original fields.
-        wire = [{**redact(e), "event_json": json.dumps(redact(e), ensure_ascii=False, allow_nan=False)} for e in events]
+        clean = [redact(e) for e in events]
+        wire = [{**e, "event_json": json.dumps(e, ensure_ascii=False, allow_nan=False)} for e in clean]
         result = self.request("/v1/tables/" + table, wire,
             {"deduplicate_insert": "enable", "insert_deduplication_token": token})
         count = result.get("written_rows", result.get("inserted"))
@@ -69,8 +70,11 @@ def sync(queue, client=None, attempts=3):
                 atomic_json(manifest, batch)
             for attempt in range(attempts):
                 try:
-                    # Artifact envelopes also belong in the complete event stream.
-                    client.insert("dev_events_raw", batch["events"], batch["deduplication_id"] + "-events")
+                    # OTLP is already represented by native signal tables. Keep its
+                    # lossless envelope in the durable local queue, not a second table.
+                    ordinary = [e for e in batch["events"] if not e["event_type"].startswith("otel.")]
+                    if ordinary:
+                        client.insert("dev_events_raw", ordinary, batch["deduplication_id"] + "-events")
                     if batch["table"] == "dev_artifacts_raw":
                         client.insert("dev_artifacts_raw", batch["events"], batch["deduplication_id"] + "-artifacts")
                     for event in batch["events"]:

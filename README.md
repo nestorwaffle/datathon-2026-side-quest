@@ -1,5 +1,15 @@
 # Observabilidad de Agentes de IA con RawTree y OpenTelemetry (DevFlight)
 
+## Servicio Windows
+
+Iniciar sin abrir ningún agente: `.venv\Scripts\python.exe start_devflight.py start`
+
+Consultar estado: `.venv\Scripts\python.exe start_devflight.py status`
+
+Detener: `.venv\Scripts\python.exe start_devflight.py stop`. Diagnóstico: `.venv\Scripts\python.exe start_devflight.py doctor`. El colector escucha solo en `127.0.0.1:8787` y mantiene la cola durable en `.devflight/telemetry`.
+
+Codex CLI requiere configurar su exportador OTLP/HTTP JSON hacia `http://127.0.0.1:8787/v1/logs` y, si se usan trazas, `http://127.0.0.1:8787/v1/traces` en la configuración de usuario. Claude Code requiere configurar `OTEL_LOGS_EXPORTER=otlp`, `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` y `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:8787` en el entorno del usuario antes de iniciar nuevas sesiones. Si se configura `DEVFLIGHT_HTTP_TOKEN`, los exportadores deben enviar el encabezado `Authorization: Bearer ...`. Los agentes ya abiertos deben reiniciarse. La captura depende de que cada proveedor emita OTLP; no se inspeccionan procesos ni tráfico. Véase [rendimiento](documentation/PERFORMANCE.md).
+
 **Fase actual: captura e ingesta, sin dashboard ni analista.** Guía operativa: [TELEMETRY_QUICKSTART.md](documentation/TELEMETRY_QUICKSTART.md). Usar `fme-trace collect` para el receptor dedicado y `fme-trace run` para agentes CLI; `run` sincroniza automáticamente al terminar. El servidor `serve` pertenece a la demo anterior.
 
 Plataforma de observabilidad y centralización de telemetría para **agentes y subagentes de desarrollo con IA (Claude Code, Codex, Cursor, CLI)** hacia **RawTree**, utilizando **OpenTelemetry (OTLP)** y una cola local durable.

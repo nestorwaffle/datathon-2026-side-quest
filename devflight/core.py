@@ -111,6 +111,7 @@ class Queue:
         self.home.mkdir(parents=True, exist_ok=True)
         self.rotate_bytes = rotate_bytes
         self.active = self.home / "active.jsonl"
+        self._sequence_ready = False
 
     def _read(self):
         events = {}
@@ -143,12 +144,18 @@ class Queue:
     def append(self, event):
         with file_lock(self.home / "queue.lock"):
             self._recover()
-            rows = self._read()
+            sequence_path = self.home / "sequence.json"
+            if sequence_path.exists() and self._sequence_ready:
+                sequence = json.loads(sequence_path.read_text(encoding="utf-8"))["sequence"]
+            else:
+                sequence = max((e["sequence"] for e in self._read()), default=0)
+                self._sequence_ready = True
             event = redact(event)
-            event["sequence"] = max((e["sequence"] for e in rows), default=0) + 1
+            event["sequence"] = sequence + 1
             raw = (json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n").encode()
             with self.active.open("ab") as f:
                 f.write(raw); f.flush(); os.fsync(f.fileno())
+            atomic_json(sequence_path, {"sequence": event["sequence"]})
             if self.active.stat().st_size >= self.rotate_bytes:
                 path = self.home / ("segment-" + uuid7() + ".jsonl.gz")
                 tmp = path.with_suffix(".tmp")
@@ -162,6 +169,12 @@ class Queue:
     def state(self):
         path = self.home / "sync.json"
         return json.loads(path.read_text()) if path.exists() else {"acked": [], "last_error": None}
+
+    def has_pending(self):
+        path = self.home / "sequence.json"
+        if not path.exists():
+            return bool(self.events())
+        return json.loads(path.read_text(encoding="utf-8"))["sequence"] > len(self.state()["acked"])
 
     def status(self):
         rows, state = self.events(), self.state()

@@ -12,6 +12,7 @@ from .rawtree import sync
 LIMIT = 4 * 1024 * 1024
 
 def make_server(queue, port=8787):
+    slots = threading.BoundedSemaphore(32)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
 
@@ -38,6 +39,16 @@ def make_server(queue, port=8787):
 
         def do_POST(self):
             if not self.authorized(): return self.reply(403, {"error": "Forbidden"})
+            if self.path == "/shutdown":
+                self.reply(200, {"stopping": True})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
+            if not slots.acquire(blocking=False):
+                self.send_response(503)
+                self.send_header("Retry-After", "1")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             try:
                 self.connection.settimeout(15)
                 if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
@@ -84,6 +95,8 @@ def make_server(queue, port=8787):
                 self.reply(200,{})
             except (ValueError, TypeError, KeyError, OSError) as error:
                 self.reply(400,{"error":str(error)})
+            finally:
+                slots.release()
     return ThreadingHTTPServer(("127.0.0.1",port),Handler)
 
 def serve(queue, port=8787, interval=5):
@@ -92,7 +105,7 @@ def serve(queue, port=8787, interval=5):
     def upload():
         while not stopped.is_set():
             try:
-                if queue.status()["pending"]: sync(queue)
+                if queue.has_pending(): sync(queue)
             except Exception as error:
                 # The queue remains intact; a separate status file avoids racing sync state.
                 atomic_json(queue.home / "collector-status.json", {"error": str(error)})
