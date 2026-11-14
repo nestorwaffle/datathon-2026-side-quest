@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Start the DevFlight collector in the background and launch an OTLP-enabled Codex CLI.
+r"""Manage the DevFlight collector and optionally launch an OTLP-enabled Codex CLI.
 
 Place this file at the root of the DevFlight repository on Windows.
 Usage:
@@ -51,30 +51,30 @@ def get_health(port):
 
 
 def ensure_collector(port):
+    from devflight.core import file_lock
     QUEUE.mkdir(parents=True, exist_ok=True)
-    status = get_health(port)
-    if status is not None:
-        print(f"[OK] Collector already running on http://127.0.0.1:{port}")
-        return status
-
-    args = [sys.executable, "-m", "devflight", "--home", str(QUEUE),
-            "collect", "--port", str(port), "--interval", "5"]
-    # CREATE_NO_WINDOW prevents an extra console; this Python process may exit.
-    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-    with LOG_PATH.open("ab") as logfile:
-        proc = subprocess.Popen(
-            args, cwd=str(ROOT), env=os.environ.copy(), stdin=subprocess.DEVNULL,
-            stdout=logfile, stderr=subprocess.STDOUT, creationflags=flags,
-        )
-    for _ in range(40):
-        if proc.poll() is not None:
-            raise RuntimeError(f"Collector stopped during startup (code {proc.returncode}). Check {LOG_PATH}")
+    with file_lock(QUEUE / "launcher.lock"):
         status = get_health(port)
         if status is not None:
-            print(f"[OK] Collector started (PID {proc.pid}) on port {port}")
-            print(f"     Collector log: {LOG_PATH}")
+            print(f"[OK] Collector already running on http://127.0.0.1:{port}")
             return status
-        time.sleep(0.25)
+        args = [sys.executable, "-m", "devflight", "--home", str(QUEUE),
+                "collect", "--port", str(port), "--interval", "5"]
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        with LOG_PATH.open("ab") as logfile:
+            proc = subprocess.Popen(
+                args, cwd=str(ROOT), env=os.environ.copy(), stdin=subprocess.DEVNULL,
+                stdout=logfile, stderr=subprocess.STDOUT, creationflags=flags,
+            )
+        for _ in range(40):
+            if proc.poll() is not None:
+                raise RuntimeError(f"Collector stopped during startup (code {proc.returncode}). Check {LOG_PATH}")
+            status = get_health(port)
+            if status is not None:
+                print(f"[OK] Collector started (PID {proc.pid}) on port {port}")
+                print(f"     Collector log: {LOG_PATH}")
+                return status
+            time.sleep(0.25)
     raise RuntimeError(f"Collector did not answer /health after startup. Check {LOG_PATH}")
 
 
@@ -140,17 +140,23 @@ def remote_status():
         return
     from devflight.rawtree import RawTree
     try:
-        rows = RawTree(read_only=True).query(
-            "SELECT timestamp, event_type, event_id FROM dev_events_raw "
-            "WHERE event_type = 'otel.logs' ORDER BY timestamp DESC LIMIT 3"
-        )
-        print("[RawTree] Latest OTLP log batches:")
-        if not rows:
-            print("  None found yet. Open the launched Codex window and do a task.")
-        for row in rows:
-            print("  " + json.dumps(row, ensure_ascii=False))
+        client = RawTree(read_only=True)
     except Exception as exc:
-        print(f"[WARNING] RawTree query failed ({type(exc).__name__}).")
+        print(f"[WARNING] RawTree connection unavailable ({type(exc).__name__}).")
+        return
+    for table in ("dev_logs", "dev_traces", "dev_metrics", "dev_events_raw"):
+        try:
+            # Native OTLP schemas differ by signal; avoid assuming column names.
+            rows = client.query(f"SELECT * FROM {table} LIMIT 1")
+        except Exception as exc:
+            message = str(exc).lower()
+            if "not found" in message or "does not exist" in message or "unknown table" in message:
+                print(f"[RawTree] {table}: table not created yet")
+            else:
+                print(f"[WARNING] {table}: query failed ({type(exc).__name__}).")
+            continue
+        print(f"[RawTree] {table}: " +
+              ("has rows; columns=" + ", ".join(rows[0]) if rows else "no rows"))
 
 
 def show_status(port):
@@ -178,8 +184,11 @@ def main():
     parser.add_argument("action", nargs="?", choices=("start", "stop", "status", "doctor"), default="start")
     parser.add_argument("--status", action="store_true", help="Show queue and RawTree status without launching")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--with-codex", action="store_true", help="Open Codex with OTLP/JSON in a separate window")
     parser.add_argument("--only-collector", action="store_true", help="Do not open a Codex window")
     args = parser.parse_args()
+    if args.with_codex and (args.action != "start" or args.only_collector or args.status):
+        parser.error("--with-codex is only valid with start")
     if os.name != "nt":
         parser.error("This launcher is intended for Windows CMD/PowerShell")
     if not (ROOT / "pyproject.toml").exists():
@@ -198,8 +207,12 @@ def main():
                 headers["Authorization"] = "Bearer " + os.environ["DEVFLIGHT_HTTP_TOKEN"]
             req = urllib.request.Request(f"http://127.0.0.1:{args.port}/shutdown", data=b"", headers=headers)
             with urllib.request.urlopen(req, timeout=3): pass
-            print("[Collector] stopping")
-            return 0
+            for _ in range(20):
+                if get_health(args.port) is None:
+                    print("[Collector] stopped")
+                    return 0
+                time.sleep(0.1)
+            raise RuntimeError("Collector did not stop within 2 seconds")
         if args.action == "doctor":
             show_status(args.port)
             check_rawtree_read()
@@ -207,7 +220,7 @@ def main():
             return 0
 
         # Validate the CLI before starting the collector, so errors are explicit.
-        if not args.only_collector and args.action != "start":
+        if args.with_codex:
             launcher = create_codex_launcher(args.port)
         status = ensure_collector(args.port)
         STATE_PATH.write_text(json.dumps({
@@ -215,7 +228,7 @@ def main():
             "started_at_epoch": time.time(),
             "port": args.port,
         }, indent=2), encoding="utf-8")
-        if args.only_collector or args.action == "start":
+        if not args.with_codex:
             print("[OK] Collector active.")
             return 0
 
