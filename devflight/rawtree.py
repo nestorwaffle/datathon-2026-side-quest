@@ -1,0 +1,96 @@
+"""RawTree HTTP API; durable batch identities survive ambiguous timeouts."""
+import hashlib
+import json
+import os
+import time
+import urllib.parse
+import urllib.request
+from .core import atomic_json, file_lock, redact
+
+class RawTree:
+    def __init__(self, read_only=False):
+        self.key = os.getenv("RAWTREE_READ_KEY" if read_only else "RAWTREE_API_KEY")
+        if not self.key:
+            raise ValueError("Configure RAWTREE_READ_KEY" if read_only else "Configure RAWTREE_API_KEY")
+        self.base = os.getenv("RAWTREE_BASE_URL", "https://api.rawtree.com").rstrip("/")
+        self.database = os.getenv("RAWTREE_DATABASE", "datathon_mathops")
+        self.read_only = read_only
+
+    def request(self, path, payload, params=None, headers=None):
+        query = urllib.parse.urlencode({"database": self.database, **(params or {})})
+        req = urllib.request.Request(self.base + path + "?" + query,
+            data=json.dumps(payload, ensure_ascii=False).encode(), headers={
+                "Authorization": "Bearer " + self.key, "Content-Type": "application/json",
+                "x-rawtree-database": self.database, **(headers or {})})
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.load(response)
+
+    def insert(self, table, events, token):
+        if self.read_only:
+            raise PermissionError("Read-only analyst client")
+        # RawTree's dynamic JSON may reformat timestamps and omit null-valued paths.
+        # Keep a lossless serialization alongside SQL-queryable original fields.
+        wire = [{**redact(e), "event_json": json.dumps(redact(e), ensure_ascii=False, allow_nan=False)} for e in events]
+        result = self.request("/v1/tables/" + table, wire,
+            {"deduplicate_insert": "enable", "insert_deduplication_token": token})
+        count = result.get("written_rows", result.get("inserted"))
+        if count is None or int(count) != len(events):
+            raise RuntimeError("Unconfirmed batch: " + str(result))
+
+    def query(self, sql):
+        if not sql.lstrip().upper().startswith("SELECT "):
+            raise ValueError("Only SELECT is allowed by the analyst")
+        return self.request("/v1/query", {"sql": sql})["data"]
+
+    def evaluations(self):
+        sql = "SELECT event_json AS event FROM dev_events_raw WHERE event_type = 'eval.grade' ORDER BY timestamp, event_id LIMIT 100000"
+        return [json.loads(r["event"]) for r in self.query(sql)], sql
+
+def sync(queue, client=None, attempts=3):
+    if os.getenv("DEVFLIGHT_OFFLINE") == "1":
+        return {**queue.status(), "offline": True}
+    client = client or RawTree()
+    with file_lock(queue.home / "sync.lock"):
+        state = queue.state()
+        manifest = queue.home / "batch.json"
+        while True:
+            if manifest.exists():
+                batch = json.loads(manifest.read_text(encoding="utf-8"))
+            else:
+                acked = set(state["acked"])
+                pending = [e for e in queue.events() if e["event_id"] not in acked]
+                if not pending:
+                    break
+                artifact = pending[0]["event_type"].startswith("artifact.")
+                rows = [e for e in pending if e["event_type"].startswith("artifact.") == artifact][:100]
+                table = "dev_artifacts_raw" if artifact else "dev_events_raw"
+                token = hashlib.sha256((table + ":" + ":".join(e["event_id"] for e in rows)).encode()).hexdigest()
+                batch = {"table": table, "events": rows, "deduplication_id": token}
+                atomic_json(manifest, batch)
+            for attempt in range(attempts):
+                try:
+                    # Artifact envelopes also belong in the complete event stream.
+                    client.insert("dev_events_raw", batch["events"], batch["deduplication_id"] + "-events")
+                    if batch["table"] == "dev_artifacts_raw":
+                        client.insert("dev_artifacts_raw", batch["events"], batch["deduplication_id"] + "-artifacts")
+                    for event in batch["events"]:
+                        if event["event_type"].startswith("otel."):
+                            signal = event["event_type"].split(".")[1]
+                            # Raw JSON remains in dev_events_raw; native transform builds signal tables.
+                            result = client.request("/otlp/v1/" + signal, event["data"],
+                                {"deduplicate_insert": "enable", "insert_deduplication_token": event["event_id"]},
+                                {"x-rawtree-" + signal + "-table": "dev_" + signal})
+                            if any(int(v) for k,v in result.get("partialSuccess", {}).items() if k.startswith("rejected")):
+                                raise RuntimeError("OTLP partial rejection")
+                    break
+                except Exception as error:
+                    state["last_error"] = redact(str(error))
+                    atomic_json(queue.home / "sync.json", state)
+                    if attempt + 1 == attempts:
+                        raise
+                    time.sleep(min(2 ** attempt, 8))
+            state["acked"] = sorted(set(state["acked"]) | {e["event_id"] for e in batch["events"]})
+            state["last_error"] = None
+            atomic_json(queue.home / "sync.json", state)
+            manifest.unlink()
+    return queue.status()

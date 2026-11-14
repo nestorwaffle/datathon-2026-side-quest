@@ -1,0 +1,31 @@
+{
+  "database": "datathon_mathops",
+  "transport": "HTTP API",
+  "tables": {
+    "dev_events_raw": 183,
+    "dev_artifacts_raw": 32,
+    "dev_traces": 1,
+    "dev_logs": 1,
+    "dev_metrics": 1
+  },
+  "implementation_events_verified": 32,
+  "retry_physical_rows": 1,
+  "lossless_recovery": true,
+  "implementation_queue": {
+    "total": 32,
+    "pending": 0,
+    "oldest": null,
+    "age_seconds": 0,
+    "last_error": null,
+    "home": "C:\\Users\\miasi\\Documents\\DATATHON\\.devflight\\implementation"
+  },
+  "collector_queue": {
+    "total": 3,
+    "pending": 0,
+    "oldest": null,
+    "age_seconds": 0,
+    "last_error": null,
+    "home": "C:\\Users\\miasi\\Documents\\DATATHON\\.devflight\\collector"
+  },
+  "notes": "Transport probes are synthetic. Implementation events record actual commands and artifacts; no external new model session was invoked."
+}

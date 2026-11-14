@@ -1,0 +1,1 @@
+{"agent":"math-copilot","model":"provisioned-local-model","prompt":"Solve the math problem. Return only A, B, C, D or E.","skill":"answer-letter","tools":["local-rag"],"budget_tokens":100,"rag_k":1}

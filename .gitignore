@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.egg-info/
+.devflight/
+.env
+models/
+data/private/
+output/
+tmp/
+api_keys.txt
