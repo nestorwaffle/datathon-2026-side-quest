@@ -72,8 +72,8 @@ flowchart LR
 Configura las credenciales de RawTree en el archivo `.env` (basado en `.env.example`, cargado automáticamente por los scripts):
 
 ```env
-RAWTREE_API_KEY=05bb7558-6f5e-4a0d-acdd-55ac53886e8d
-RAWTREE_READ_KEY=05bb7558-6f5e-4a0d-acdd-55ac53886e8d
+RAWTREE_API_KEY=<clave-de-ingesta>
+RAWTREE_READ_KEY=<clave-de-lectura>
 RAWTREE_BASE_URL=https://api.rawtree.com
 RAWTREE_DATABASE=datathon_mathops
 DEVFLIGHT_HOME=.devflight

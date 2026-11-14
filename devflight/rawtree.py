@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import time
+import datetime as dt
 import urllib.parse
 import urllib.request
 from .core import atomic_json, file_lock, redact
@@ -53,17 +54,31 @@ def sync(queue, client=None, attempts=3):
     client = client or RawTree()
     with file_lock(queue.home / "sync.lock"):
         state = queue.state()
+        rows_snapshot = queue.events()
+        if "acked_sequence" not in state:
+            legacy = set(state.get("acked", []))
+            cursor = 0
+            for event in rows_snapshot:
+                if event["sequence"] != cursor + 1 or event["event_id"] not in legacy:
+                    break
+                cursor = event["sequence"]
+            state["acked_sequence"] = cursor
+            state["acked"] = list(legacy - {e["event_id"] for e in rows_snapshot if e["sequence"] <= cursor})
         manifest = queue.home / "batch.json"
         while True:
             if manifest.exists():
                 batch = json.loads(manifest.read_text(encoding="utf-8"))
             else:
-                acked = set(state["acked"])
-                pending = [e for e in queue.events() if e["event_id"] not in acked]
+                acked = set(state.get("acked", []))
+                pending = [e for e in rows_snapshot if e["sequence"] > state["acked_sequence"] and e["event_id"] not in acked]
                 if not pending:
                     break
                 artifact = pending[0]["event_type"].startswith("artifact.")
-                rows = [e for e in pending if e["event_type"].startswith("artifact.") == artifact][:100]
+                rows = []
+                for event in pending:
+                    if event["event_type"].startswith("artifact.") != artifact or len(rows) == 100:
+                        break
+                    rows.append(event)
                 table = "dev_artifacts_raw" if artifact else "dev_events_raw"
                 token = hashlib.sha256((table + ":" + ":".join(e["event_id"] for e in rows)).encode()).hexdigest()
                 batch = {"table": table, "events": rows, "deduplication_id": token}
@@ -89,12 +104,17 @@ def sync(queue, client=None, attempts=3):
                     break
                 except Exception as error:
                     state["last_error"] = redact(str(error))
+                    state["retries"] = state.get("retries", 0) + 1
                     atomic_json(queue.home / "sync.json", state)
                     if attempt + 1 == attempts:
                         raise
                     time.sleep(min(2 ** attempt, 8))
-            state["acked"] = sorted(set(state["acked"]) | {e["event_id"] for e in batch["events"]})
+            state["acked_sequence"] = max(state["acked_sequence"], max(e["sequence"] for e in batch["events"]))
+            state["acked"] = [identifier for identifier in state.get("acked", [])
+                              if identifier not in {e["event_id"] for e in batch["events"]}]
             state["last_error"] = None
+            state["last_sync"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            state["batches_sent"] = state.get("batches_sent", 0) + 1
             atomic_json(queue.home / "sync.json", state)
             manifest.unlink()
     return queue.status()

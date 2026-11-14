@@ -146,8 +146,9 @@ def remote_status():
         return
     for table in ("dev_logs", "dev_traces", "dev_metrics", "dev_events_raw"):
         try:
-            # Native OTLP schemas differ by signal; avoid assuming column names.
-            rows = client.query(f"SELECT * FROM {table} LIMIT 1")
+            rows = client.query(
+                f"SELECT count() AS recent_rows FROM {table} "
+                "WHERE timestamp >= now() - INTERVAL 30 MINUTE")
         except Exception as exc:
             message = str(exc).lower()
             if "not found" in message or "does not exist" in message or "unknown table" in message:
@@ -156,7 +157,7 @@ def remote_status():
                 print(f"[WARNING] {table}: query failed ({type(exc).__name__}).")
             continue
         print(f"[RawTree] {table}: " +
-              ("has rows; columns=" + ", ".join(rows[0]) if rows else "no rows"))
+              (f"{rows[0].get('recent_rows', 0)} rows in last 30 minutes" if rows else "no rows"))
 
 
 def show_status(port):
@@ -205,6 +206,7 @@ def main():
             headers = {}
             if os.environ.get("DEVFLIGHT_HTTP_TOKEN"):
                 headers["Authorization"] = "Bearer " + os.environ["DEVFLIGHT_HTTP_TOKEN"]
+            headers["X-DevFlight-Control"] = (QUEUE / "control.key").read_text(encoding="ascii").strip()
             req = urllib.request.Request(f"http://127.0.0.1:{args.port}/shutdown", data=b"", headers=headers)
             with urllib.request.urlopen(req, timeout=3): pass
             for _ in range(20):

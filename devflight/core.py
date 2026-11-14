@@ -128,8 +128,16 @@ class Queue:
     def _recover(self):
         if not self.active.exists():
             return
+        with self.active.open("rb") as stream:
+            stream.seek(0, 2)
+            size = stream.tell()
+            if not size:
+                return
+            stream.seek(-1, 2)
+            if stream.read(1) == b"\n":
+                return
         raw = self.active.read_bytes()
-        if raw and not raw.endswith(b"\n"):
+        if raw:
             end = raw.rfind(b"\n") + 1
             # Keep a damaged tail for diagnosis, never silently discard it.
             (self.home / ("damaged-" + uuid7() + ".bin")).write_bytes(raw[end:])
@@ -174,16 +182,34 @@ class Queue:
         path = self.home / "sequence.json"
         if not path.exists():
             return bool(self.events())
-        return json.loads(path.read_text(encoding="utf-8"))["sequence"] > len(self.state()["acked"])
+        state = self.state()
+        acknowledged = state.get("acked_sequence")
+        if acknowledged is None:
+            acknowledged = len(state.get("acked", []))
+        return json.loads(path.read_text(encoding="utf-8"))["sequence"] > acknowledged
 
     def status(self):
-        rows, state = self.events(), self.state()
-        acked = set(state["acked"])
-        pending = [e for e in rows if e["event_id"] not in acked]
-        oldest = pending[0]["timestamp"] if pending else None
+        state = self.state()
+        sequence_path = self.home / "sequence.json"
+        if sequence_path.exists():
+            total = json.loads(sequence_path.read_text(encoding="utf-8"))["sequence"]
+            acknowledged = state.get("acked_sequence", len(state.get("acked", [])))
+            pending_count = max(0, total - acknowledged)
+            oldest = state.get("oldest_pending") if pending_count else None
+        else:
+            rows = self.events()
+            total = len(rows)
+            acknowledged = set(state.get("acked", []))
+            pending = [e for e in rows if e["event_id"] not in acknowledged]
+            pending_count = len(pending)
+            oldest = pending[0]["timestamp"] if pending else None
         age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(oldest)).total_seconds() if oldest else 0
-        return {"total": len(rows), "pending": len(pending), "oldest": oldest,
-                "age_seconds": age, "last_error": state.get("last_error"), "home": str(self.home)}
+        disk_bytes = sum(p.stat().st_size for p in self.home.glob("*.jsonl*"))
+        return {"total": total, "pending": pending_count, "oldest": oldest,
+                "age_seconds": age, "last_error": state.get("last_error"), "home": str(self.home),
+                "disk_bytes": disk_bytes, "last_sync": state.get("last_sync"),
+                "batches_sent": state.get("batches_sent", 0), "retries": state.get("retries", 0),
+                "dropped": 0, "ingest_seconds": state.get("ingest_seconds", 0)}
 
 class Trace:
     def __init__(self, queue=None, agent="python", task="development", kind="bug_fix", model="unknown", parent=None):

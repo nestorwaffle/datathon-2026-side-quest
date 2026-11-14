@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .core import Trace, redact, atomic_json
@@ -13,6 +14,16 @@ LIMIT = 4 * 1024 * 1024
 
 def make_server(queue, port=8787):
     slots = threading.BoundedSemaphore(32)
+    control_path = queue.home / "control.key"
+    if control_path.exists():
+        control_key = control_path.read_text(encoding="ascii").strip()
+    else:
+        control_key = secrets.token_hex(32)
+        try:
+            with control_path.open("x", encoding="ascii") as stream:
+                stream.write(control_key)
+        except FileExistsError:
+            control_key = control_path.read_text(encoding="ascii").strip()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
 
@@ -40,6 +51,8 @@ def make_server(queue, port=8787):
         def do_POST(self):
             if not self.authorized(): return self.reply(403, {"error": "Forbidden"})
             if self.path == "/shutdown":
+                if not hmac.compare_digest(self.headers.get("X-DevFlight-Control", ""), control_key):
+                    return self.reply(403, {"error": "Forbidden"})
                 self.reply(200, {"stopping": True})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
