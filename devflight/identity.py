@@ -3,7 +3,6 @@ import contextlib
 import datetime as dt
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import secrets
@@ -13,6 +12,7 @@ import uuid
 import gzip
 
 from .core import redact
+from .normalization import normalize_event, normalize_otlp
 
 ROLES = {"admin", "team_manager", "member", "viewer"}
 
@@ -182,110 +182,94 @@ class Store:
 
     def normalize(self, identity, body):
         if identity["role"] == "viewer": raise PermissionError("Viewer cannot ingest")
+        row=normalize_event(body)
         now=time.time()
-        timestamp=body.get("timestamp")
+        timestamp=row.get("timestamp")
         if timestamp is not None:
             parsed=dt.datetime.fromisoformat(str(timestamp).replace("Z","+00:00"))
             if parsed.tzinfo is None: raise ValueError("Timestamp must include timezone")
             now=parsed.timestamp()
-        row={"org_id":identity["org_id"],"user_id":identity["user_id"],"team_id":identity.get("team_id"),
-             "timestamp":dt.datetime.fromtimestamp(now,dt.timezone.utc).isoformat(),"occurred_at_epoch":now,
-             "synthetic":body.get("synthetic") is True}
-        for key in ("provider","agent","model","session_id","trace_id","span_id","parent_span_id","event_type","status","tool","error_type","run_id","activity_kind","provenance","file_path","file_sha256"):
-            row[key]=safe_text(body.get(key))
-        row["event_type"]=row["event_type"] or "event"
-        for key in ("input_tokens","output_tokens","cached_tokens","duration_ms","observed_cost_usd"):
-            value=body.get(key)
-            if value is not None and (isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<0):
-                raise ValueError("Invalid numeric field: "+key)
-            row[key]=value
-        project=body.get("project_id")
+        # Authentication and reported origin are separate. A shared ingest key
+        # must never turn every originating developer into its credential owner.
+        row.update(org_id=identity["org_id"], user_id=identity["user_id"],
+                   ingest_user_id=identity["user_id"], ingest_org_id=identity["org_id"],
+                   team_id=identity.get("team_id"),
+                   timestamp=dt.datetime.fromtimestamp(now,dt.timezone.utc).isoformat(),
+                   occurred_at_epoch=now)
+        project=row.get("project_id")
         if project:
             with self.db() as db:
                 if not db.execute("SELECT 1 FROM projects WHERE id=? AND org_id=?",(project,identity["org_id"])).fetchone():
                     raise PermissionError("Project access denied")
         row["project_id"]=project
-        source_id=safe_text(body.get("event_id"),256)
+        source_id=row.get("source_event_id")
         row["event_id"]=digest(identity["org_id"]+":"+identity["user_id"]+":"+source_id) if source_id else identifier()
+        row["source_event_id"]=source_id or row["event_id"]
+        row["canonical_id"]=row.get("canonical_id") or row["source_event_id"]
         return row
 
     def ingest(self, identity, body):
         row=self.normalize(identity,body)
-        self.check_capacity()
+        payload=json.dumps(row,allow_nan=False)
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing=db.execute("SELECT payload FROM outbox WHERE id=?",(row["event_id"],)).fetchone()
+            if existing:
+                saved=json.loads(existing[0])
+                return row if "archive_file" in saved else saved
+            self.check_capacity(len(payload.encode("utf-8")))
             db.execute("INSERT OR IGNORE INTO outbox(id,org_id,table_name,payload,created) VALUES (?,?,?,?,?)",
-                       (row["event_id"],identity["org_id"],"dev_platform_events",json.dumps(row,allow_nan=False),time.time()))
+                       (row["event_id"],identity["org_id"],"dev_platform_events",payload,time.time()))
         return row
 
-    def check_capacity(self):
+    def check_capacity(self, incoming_bytes=0):
         limit=int(os.getenv("DEVFLIGHT_PLATFORM_MAX_BYTES","536870912"))
         if limit<0: raise ValueError("DEVFLIGHT_PLATFORM_MAX_BYTES must be nonnegative")
         size=sum(p.stat().st_size for pattern in ("platform.sqlite3*","archive-*.jsonl.gz") for p in self.home.glob(pattern))
-        if limit and size>=limit:
+        if limit and size+incoming_bytes>=limit:
             raise OSError("Enterprise storage limit reached; no event accepted. Archive externally or increase the configured limit.")
 
     def ingest_otlp(self, identity, signal, body):
-        self.check_capacity()
-        field={"logs":"resourceLogs","traces":"resourceSpans","metrics":"resourceMetrics"}.get(signal)
-        if not field or not isinstance(body.get(field),list): raise ValueError("Invalid OTLP envelope")
-        rows=[]
-        def attrs(items):
-            result={}
-            for attribute in items:
-                if not isinstance(attribute,dict) or not isinstance(attribute.get("value"),dict): continue
-                value=attribute["value"]
-                if "intValue" in value:
-                    try: result[attribute.get("key")]=int(value["intValue"])
-                    except (ValueError,TypeError): continue
-                elif "doubleValue" in value: result[attribute.get("key")]=value["doubleValue"]
-                else: result[attribute.get("key")]=value.get("stringValue")
-            return result
-        for resource in body[field]:
-            base=attrs(resource.get("resource",{}).get("attributes",[]))
-            scopes=resource.get({"logs":"scopeLogs","traces":"scopeSpans","metrics":"scopeMetrics"}[signal],[])
-            for scope in scopes:
-                records=scope.get({"logs":"logRecords","traces":"spans","metrics":"metrics"}[signal],[])
-                for record in records:
-                    a={**base,**attrs(record.get("attributes",[]))}
-                    # Metric datapoints stay individually timestamped and retain only known consumption metrics.
-                    points=[record] if signal!="metrics" else [p for k in ("sum","gauge","histogram") for p in record.get(k,{}).get("dataPoints",[])]
-                    for point in points:
-                        attributes={**a,**attrs(point.get("attributes",[]))}
-                        ns=point.get("timeUnixNano") or record.get("startTimeUnixNano")
-                        event={"provider":attributes.get("gen_ai.provider.name") or attributes.get("gen_ai.system"),
-                               "agent":attributes.get("service.name"),"model":attributes.get("gen_ai.request.model") or attributes.get("model"),
-                               "session_id":attributes.get("session.id") or attributes.get("session_id") or attributes.get("conversation.id"),
-                               "trace_id":record.get("traceId"),"span_id":record.get("spanId"),"parent_span_id":record.get("parentSpanId"),
-                               "event_type":record.get("eventName") or record.get("name") or "otel."+signal,
-                               "tool":attributes.get("gen_ai.tool.name") or attributes.get("tool.name"),
-                               "error_type":attributes.get("error.type"),
-                               "status":"error" if record.get("status",{}).get("code")==2 or record.get("severityNumber",0)>=17 else None}
-                        if ns: event["timestamp"]=dt.datetime.fromtimestamp(int(ns)/1e9,dt.timezone.utc).isoformat()
-                        # Never add cumulative metric samples, nested spans and log usage
-                        # together. Consumption is promoted only from explicit usage logs.
-                        usage_log=signal=="logs" and any(part in str(event["event_type"]).lower() for part in ("usage","turn.completed","api_request","api_response"))
-                        for name,keys in {"input_tokens":("gen_ai.usage.input_tokens","input_token_count","input_tokens"),"output_tokens":("gen_ai.usage.output_tokens","output_token_count","output_tokens")}.items():
-                            event[name]=next((attributes[k] for k in keys if isinstance(attributes.get(k),(int,float))),None) if usage_log else None
-                        event["activity_kind"]="agent"
-                        event["provenance"]="official-otlp-"+signal
-                        if record.get("endTimeUnixNano") and record.get("startTimeUnixNano"):
-                            event["duration_ms"]=(int(record["endTimeUnixNano"])-int(record["startTimeUnixNano"]))/1e6
-                        event["event_id"]=digest(json.dumps({"signal":signal,"resource":base,"record":record,"point":point},sort_keys=True,separators=(",",":")))
-                        rows.append(self.normalize(identity,event))
+        if identity["role"] == "viewer": raise PermissionError("Viewer cannot ingest")
+        rows=[self.normalize(identity,event) for event in normalize_otlp(signal,body)]
+        payloads=[(row,json.dumps(row,allow_nan=False)) for row in rows]
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            fresh=[]
+            seen=set()
+            for row,payload in payloads:
+                if row["event_id"] not in seen and not db.execute("SELECT 1 FROM outbox WHERE id=?",(row["event_id"],)).fetchone():
+                    fresh.append((row,payload))
+                    seen.add(row["event_id"])
+            if fresh: self.check_capacity(sum(len(payload.encode("utf-8")) for _,payload in fresh))
             db.executemany("INSERT OR IGNORE INTO outbox(id,org_id,table_name,payload,created) VALUES (?,?,?,?,?)",
-                           [(r["event_id"],identity["org_id"],"dev_platform_events",json.dumps(r,allow_nan=False),time.time()) for r in rows])
-        return {"accepted":len(rows)}
+                           [(row["event_id"],identity["org_id"],"dev_platform_events",payload,time.time()) for row,payload in fresh])
+        return {"accepted":len(rows),"persisted":len(fresh),"duplicates":len(rows)-len(fresh)}
 
     def save_investigation(self, identity, record):
+        return self.save_analyst_result(identity, record)
+
+    def save_analyst_result(self, identity, record, usage_event=None):
+        """Atomically persist a terminal investigation, its audit and model usage.
+
+        Running checkpoints belong in analyst_jobs; terminal audit payloads are
+        immutable outbox events so a network retry always has identical bytes.
+        """
         record=redact(dict(record))
         record.setdefault("id",identifier()); record.setdefault("created_at",stamp())
         record.update(org_id=identity["org_id"],user_id=identity["user_id"],team_id=identity.get("team_id"))
         payload=json.dumps(record,allow_nan=False)
+        usage=self.normalize(identity,usage_event) if usage_event is not None else None
+        usage_payload=json.dumps(usage,allow_nan=False) if usage is not None else None
+        audit={**record,"event_id":record["id"],"timestamp":record["created_at"],"event_type":"analyst.investigation"}
+        audit_payload=json.dumps(audit,allow_nan=False)
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.check_capacity(len(payload.encode("utf-8"))+len(audit_payload.encode("utf-8"))+len((usage_payload or "").encode("utf-8")))
             db.execute("INSERT OR REPLACE INTO investigations VALUES (?,?,?,?,?,?)",(record["id"],identity["org_id"],identity["user_id"],identity.get("team_id"),record["created_at"],payload))
-            audit={**record,"event_id":record["id"],"timestamp":record["created_at"],"event_type":"analyst.investigation"}
-            db.execute("INSERT OR IGNORE INTO outbox(id,org_id,table_name,payload,created) VALUES (?,?,?,?,?)",(record["id"],identity["org_id"],"dev_investigations",json.dumps(audit),time.time()))
+            db.execute("INSERT OR IGNORE INTO outbox(id,org_id,table_name,payload,created) VALUES (?,?,?,?,?)",(record["id"],identity["org_id"],"dev_investigations",audit_payload,time.time()))
+            if usage is not None:
+                db.execute("INSERT OR IGNORE INTO outbox(id,org_id,table_name,payload,created) VALUES (?,?,?,?,?)",(usage["event_id"],identity["org_id"],"dev_platform_events",usage_payload,time.time()))
         return record
 
     def list_investigations(self,identity):
@@ -300,9 +284,25 @@ class Store:
         where=" WHERE org_id=?" if identity else ""
         args=(identity["org_id"],) if identity else ()
         with self.db() as db:
-            row=dict(db.execute("SELECT count(*) AS total,sum(CASE WHEN acked IS NULL THEN 1 ELSE 0 END) AS pending,max(acked) AS last_sync,sum(attempts) AS retries FROM outbox"+where,args).fetchone())
+            row=dict(db.execute("SELECT count(*) AS total,sum(CASE WHEN acked IS NULL THEN 1 ELSE 0 END) AS pending,max(acked) AS last_sync,sum(attempts) AS retries,min(CASE WHEN acked IS NULL THEN created END) AS oldest_pending_epoch FROM outbox"+where,args).fetchone())
             error=db.execute("SELECT last_error FROM outbox WHERE last_error IS NOT NULL"+(" AND org_id=?" if identity else "")+" ORDER BY created DESC LIMIT 1",args).fetchone()
-        return {**row,"pending":row["pending"] or 0,"last_error":error[0] if error else None,"disk_bytes":None if identity else sum(p.stat().st_size for p in self.home.glob("platform.sqlite3*"))}
+            state=db.execute("SELECT value FROM metadata WHERE key=?",("uploader:"+identity["org_id"] if identity else "uploader",)).fetchone()
+            state=json.loads(state[0]) if state else {}
+        oldest=row.pop("oldest_pending_epoch")
+        return {**row,"pending":row["pending"] or 0,"retries":row["retries"] or 0,
+                "last_error":error[0] if error else state.get("last_error"),
+                "last_attempt":state.get("last_attempt"),"last_success":state.get("last_success"),
+                "offline":os.getenv("DEVFLIGHT_OFFLINE")=="1",
+                "oldest_pending":dt.datetime.fromtimestamp(oldest,dt.timezone.utc).isoformat() if oldest else None,
+                "age_seconds":max(0,time.time()-oldest) if oldest else 0,
+                "disk_bytes":None if identity else sum(p.stat().st_size for p in self.home.glob("platform.sqlite3*"))}
+
+    def _upload_state(self, db, organizations, **updates):
+        for key in ["uploader", *("uploader:"+org for org in sorted(set(organizations)))]:
+            saved=db.execute("SELECT value FROM metadata WHERE key=?",(key,)).fetchone()
+            state=json.loads(saved[0]) if saved else {}
+            state.update(updates)
+            db.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)",(key,json.dumps(state,allow_nan=False)))
 
     def archive_confirmed(self):
         """Opt-in payload compaction. Complete acknowledged envelopes remain in gzip archives."""
@@ -330,26 +330,41 @@ class Store:
                 saved=db.execute("SELECT value FROM metadata WHERE key='outbox_manifest'").fetchone()
                 if saved:
                     manifest=json.loads(saved[0])
-                    pending=[db.execute("SELECT id,table_name,payload FROM outbox WHERE id=?",(i,)).fetchone() for i in manifest]
+                    pending=[db.execute("SELECT id,org_id,table_name,payload FROM outbox WHERE id=?",(i,)).fetchone() for i in manifest]
                     if any(r is None for r in pending): raise ValueError("Outbox manifest references missing telemetry")
                 else:
-                    pending=db.execute("SELECT id,table_name,payload FROM outbox WHERE acked IS NULL ORDER BY created,id LIMIT 100").fetchall()
+                    pending=db.execute("SELECT id,org_id,table_name,payload FROM outbox WHERE acked IS NULL ORDER BY created,id LIMIT 100").fetchall()
                     if pending:
                         db.execute("INSERT OR REPLACE INTO metadata VALUES ('outbox_manifest',?)",(json.dumps([r["id"] for r in pending]),))
             if not pending: return 0
-            client=client or RawTree()
+            if os.getenv("DEVFLIGHT_OFFLINE")=="1":
+                return 0
+            organizations={row["org_id"] for row in pending}
+            with self.db() as db:
+                self._upload_state(db,organizations,last_attempt=time.time())
+            try:
+                client=client or RawTree()
+            except Exception as exc:
+                message=redact(str(exc))[:500]
+                with self.db() as db:
+                    db.executemany("UPDATE outbox SET attempts=attempts+1,last_error=? WHERE id=?",[(message,row["id"]) for row in pending])
+                    self._upload_state(db,organizations,last_error=message)
+                raise
             for table in sorted({r["table_name"] for r in pending}):
                 batch=[r for r in pending if r["table_name"]==table]
-                rows=[json.loads(r["payload"]) for r in batch]
                 token=digest(table+":"+":".join(r["id"] for r in batch))
                 try:
+                    rows=[json.loads(r["payload"]) for r in batch]
                     client.insert(table,rows,token)
                 except Exception as exc:
+                    message=redact(str(exc))[:500]
                     with self.db() as db:
-                        db.executemany("UPDATE outbox SET attempts=attempts+1,last_error=? WHERE id=?",[(redact(str(exc))[:500],r["id"]) for r in batch])
+                        db.executemany("UPDATE outbox SET attempts=attempts+1,last_error=? WHERE id=?",[(message,r["id"]) for r in batch])
+                        self._upload_state(db,{r["org_id"] for r in batch},last_error=message)
                     raise
                 with self.db() as db:
                     db.executemany("UPDATE outbox SET acked=?,last_error=NULL WHERE id=?",[(time.time(),r["id"]) for r in batch])
+                    self._upload_state(db,{r["org_id"] for r in batch},last_error=None,last_success=time.time())
                     remaining=[r["id"] for r in pending if r["table_name"]>table]
                     if remaining: db.execute("INSERT OR REPLACE INTO metadata VALUES ('outbox_manifest',?)",(json.dumps(remaining),))
                     else: db.execute("DELETE FROM metadata WHERE key='outbox_manifest'")

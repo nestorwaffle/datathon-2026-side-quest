@@ -202,6 +202,7 @@ def make_server(queue, port=8787, enterprise_store=None):
                 trace = Trace(queue, agent="otlp" if self.path.startswith("/v1/") else "http")
                 if self.path == "/events":
                     context = body.get("context", {})
+                    if not isinstance(context,dict): raise ValueError("Invalid context")
                     for name, size in (("trace_id", 32), ("span_id", 16), ("parent_span_id", 16)):
                         if name in context:
                             if not isinstance(context[name], str) or not re.fullmatch("[a-fA-F0-9]{"+str(size)+"}", context[name]):
@@ -217,10 +218,13 @@ def make_server(queue, port=8787, enterprise_store=None):
                     elif isinstance(agent,dict):
                         for key in ("id","model","framework"):
                             if isinstance(agent.get(key),str): trace.agent[key]=agent[key]
+                    if isinstance(body.get("model"),str): trace.agent["model"]=body["model"]
                     if enterprise_store is not None:
                         event = enterprise_store.ingest(identity, body)
                     else:
-                        event = trace.emit(body["event_type"], body.get("data",{}))
+                        status=body.get("status","ok")
+                        if not isinstance(status,str) or len(status)>128: raise ValueError("Invalid status")
+                        event = trace.emit(body["event_type"], body.get("data",{}),status=status,event_id=body.get("event_id"))
                     return self.reply(201, {"event_id":event["event_id"]})
                 signal = self.path.rsplit("/",1)[-1]
                 field = {"traces":"resourceSpans", "logs":"resourceLogs", "metrics":"resourceMetrics"}.get(signal)
@@ -239,6 +243,8 @@ def make_server(queue, port=8787, enterprise_store=None):
                 trace.developer_id = identity.get("developer.id")
                 trace.emit("otel."+signal,body)
                 self.reply(200,{})
+            except PermissionError as error:
+                self.reply(403,{"error":str(error)})
             except (OSError, sqlite3.Error):
                 self.send_response(503)
                 self.send_header("Retry-After", "5")

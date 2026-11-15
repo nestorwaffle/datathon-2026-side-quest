@@ -187,6 +187,12 @@ class Queue:
     def append(self, event):
         with file_lock(self.home / "queue.lock"):
             self._recover()
+            if event.get("source_event_id"):
+                # External SDK retries reuse their producer ID. Acknowledging an
+                # already durable event must not append a second physical row.
+                existing=next((row for row in self._read() if row["event_id"]==event["event_id"]),None)
+                if existing is not None:
+                    return existing
             sequence_path = self.home / "sequence.json"
             if sequence_path.exists() and self._sequence_ready:
                 sequence = max(json.loads(sequence_path.read_text(encoding="utf-8"))["sequence"], self._tail_sequence())
@@ -264,10 +270,13 @@ class Trace:
         self.developer_id = parent.developer_id if parent else (os.getenv("DEVFLIGHT_DEVELOPER_ID") or "unassigned")
         self.session_id = parent.session_id if parent else (os.getenv("DEVFLIGHT_SESSION_ID") or self.run_id)
 
-    def emit(self, event_type, data=None, status="ok", artifacts=None):
+    def emit(self, event_type, data=None, status="ok", artifacts=None, event_id=None):
         if not isinstance(event_type, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,100}", event_type):
             raise ValueError("Invalid event_type")
-        return self.queue.append({"schema_version": 1, "event_id": uuid7(),
+        if event_id is not None and (not isinstance(event_id,str) or not 1<=len(event_id)<=512):
+            raise ValueError("Invalid event_id")
+        return self.queue.append({"schema_version": 1, "event_id": event_id or uuid7(),
+            **({"source_event_id":event_id} if event_id else {}),
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(), "project_id": "datathon-mathops",
             "run_id": self.run_id, "trace_id": self.trace_id, "span_id": self.span_id,
             "parent_span_id": self.parent_span_id, "agent": self.agent, "task": self.task,
