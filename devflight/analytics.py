@@ -417,36 +417,36 @@ class Analytics:
             return {"data": [], "sql": None, "source": "RawTree", "scope": scope_info, "coverage": coverage, "hours": args["hours"], "empty_source": True}
         where = self.where(identity, args, scope)
         aggregates = (
-            "count() AS events,countIf(status='error') AS errors,"
-            "sumOrNull(input_tokens) AS input_tokens,sumOrNull(output_tokens) AS output_tokens,"
-            "avgOrNull(duration_ms) AS latency_ms,"
-            "countIf(input_tokens IS NOT NULL OR output_tokens IS NOT NULL) AS events_with_usage,"
-            "countIf(usage_kind='session_total') AS session_total_reports,"
-            "countIf(usage_kind='metric_sample') AS metric_samples"
+            "count() AS events,countIf(e.status='error') AS errors,"
+            "sumOrNull(e.input_tokens) AS input_tokens,sumOrNull(e.output_tokens) AS output_tokens,"
+            "avgOrNull(e.duration_ms) AS latency_ms,"
+            "countIf(e.input_tokens IS NOT NULL OR e.output_tokens IS NOT NULL) AS events_with_usage,"
+            "countIf(e.usage_kind='session_total') AS session_total_reports,"
+            "countIf(e.usage_kind='metric_sample') AS metric_samples"
         )
         if name == "overview":
             select = (
-                aggregates + ",countIf(synthetic=true) AS synthetic_events,"
-                "sumOrNull(cached_tokens) AS cached_tokens,sumOrNull(cache_creation_tokens) AS cache_creation_tokens,"
-                "sumOrNull(reasoning_tokens) AS reasoning_tokens,sumOrNull(observed_cost_usd) AS cost_usd,"
-                "uniqExact(session_id) AS sessions,uniqExact(origin_user_id) AS emitters,"
-                "countIf(origin_user_id IS NULL) AS unattributed_events,"
-                "countIf(observed_cost_usd IS NOT NULL) AS events_with_cost"
+                aggregates + ",countIf(e.synthetic=true) AS synthetic_events,"
+                "sumOrNull(e.cached_tokens) AS cached_tokens,sumOrNull(e.cache_creation_tokens) AS cache_creation_tokens,"
+                "sumOrNull(e.reasoning_tokens) AS reasoning_tokens,sumOrNull(e.observed_cost_usd) AS cost_usd,"
+                "uniqExact(e.session_id) AS sessions,uniqExact(e.origin_user_id) AS emitters,"
+                "countIf(e.origin_user_id IS NULL) AS unattributed_events,"
+                "countIf(e.observed_cost_usd IS NOT NULL) AS events_with_cost"
             )
             suffix = ""
         elif name in ("agents", "usage"):
             grouping="provider,model,agent"+(",agent_id" if name=="agents" else "")
-            select = grouping+","+aggregates+",sumOrNull(cached_tokens) AS cached_tokens,sumOrNull(cache_creation_tokens) AS cache_creation_tokens,sumOrNull(reasoning_tokens) AS reasoning_tokens,sumOrNull(observed_cost_usd) AS observed_cost_usd"
+            select = grouping+","+aggregates+",sumOrNull(e.cached_tokens) AS cached_tokens,sumOrNull(e.cache_creation_tokens) AS cache_creation_tokens,sumOrNull(e.reasoning_tokens) AS reasoning_tokens,sumOrNull(e.observed_cost_usd) AS observed_cost_usd"
             suffix = " GROUP BY "+grouping+" ORDER BY events DESC LIMIT 100"
         elif name == "sessions":
-            select = "session_id,origin_user_id,provider,model," + aggregates + ",max(timestamp) AS last_seen"
+            select = "session_id,origin_user_id,provider,model," + aggregates + ",max(e.timestamp) AS last_seen"
             suffix = " GROUP BY session_id,origin_user_id,provider,model ORDER BY last_seen DESC,session_id LIMIT 50 OFFSET " + str((args["page"] - 1) * 50)
         elif name == "errors":
             select = "session_id,provider,tool,error_type,count() AS failures"
             where += " AND status='error'"
             suffix = " GROUP BY session_id,provider,tool,error_type ORDER BY failures DESC LIMIT 50"
         elif name == "people":
-            select = "origin_user_id,argMax(origin_user_name,occurred_at_epoch) AS origin_user_name,origin_user_id AS user_id,team_id," + aggregates
+            select = "origin_user_id,argMax(e.origin_user_name,e.occurred_at_epoch) AS origin_user_name,e.origin_user_id AS user_id,team_id," + aggregates
             suffix = " GROUP BY origin_user_id,team_id ORDER BY events DESC LIMIT 100"
         elif name=="timeline" and args.get("session_id"):
             fields = list(DIMENSIONS) + list(NUMBERS) + ["synthetic", "source_table"]
@@ -456,7 +456,7 @@ class Analytics:
             select = "floor(occurred_at_epoch/3600)*3600 AS hour,count() AS events,countIf(status='error') AS errors"
             where += " AND occurred_at_epoch IS NOT NULL"
             suffix = " GROUP BY hour ORDER BY hour DESC LIMIT 1000"
-        sql = "SELECT " + select + " FROM " + source + " WHERE " + where + suffix
+        sql = "SELECT " + select + " FROM " + source + " AS e WHERE " + where + suffix
         key = (identity["org_id"], identity["user_id"], identity["role"], identity.get("team_id"), scope, sql)
         with self._lock:
             cached = self._cache.get(key)
