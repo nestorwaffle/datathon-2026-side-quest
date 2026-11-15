@@ -30,30 +30,45 @@ def report(queue=None, port=8787):
     gemini = _json_settings(home / ".gemini" / "settings.json").get("telemetry", {})
     qwen = _json_settings(home / ".qwen" / "settings.json").get("telemetry", {})
     codex_exporter = codex.get("otel", {}).get("exporter", {})
-    codex_endpoint = str(codex_exporter.get("otlp-http", {}).get("endpoint", "")) if isinstance(codex_exporter, dict) else ""
+    codex_http = codex_exporter.get("otlp-http", {}) if isinstance(codex_exporter, dict) else {}
+    codex_endpoint = str(codex_http.get("endpoint", ""))
     def local(endpoint):
         try:
             parsed = urlsplit(str(endpoint))
-            return parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost") and parsed.port == port
+            accepted_ports={8787,8788} if port in (8787,8788) else {port}
+            return parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost") and parsed.port in accepted_ports
         except ValueError:
             return False
     configured = {
         "codex": local(codex_endpoint),
-        "claude_code": local(os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")),
+        "claude_code": (os.getenv("CLAUDE_CODE_ENABLE_TELEMETRY", "").lower() in ("1", "true")
+                        and any("otlp" in os.getenv(name, "").split(",") for name in ("OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_TRACES_EXPORTER"))
+                        and local(os.getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")))),
         "gemini_cli": bool(os.getenv("GEMINI_TELEMETRY_ENABLED", str(gemini.get("enabled", ""))).lower() in ("true", "1")
                            and local(os.getenv("GEMINI_TELEMETRY_OTLP_ENDPOINT", gemini.get("otlpEndpoint", "")))),
         "qwen_code": bool(os.getenv("QWEN_TELEMETRY_ENABLED", str(qwen.get("enabled", ""))).lower() in ("true", "1")
                           and local(os.getenv("QWEN_TELEMETRY_OTLP_ENDPOINT", qwen.get("otlpEndpoint", "")))),
     }
     # A configured exporter may target another collector. Report no false readiness.
+    def bearer_header(value):
+        if isinstance(value,dict):
+            return any(str(key).lower()=="authorization" and isinstance(val,str) and val.startswith("Bearer ") for key,val in value.items())
+        return isinstance(value,str) and any(part.strip().lower().startswith("authorization=bearer ") for part in value.split(","))
+    common_headers=os.getenv("OTEL_EXPORTER_OTLP_LOGS_HEADERS",os.getenv("OTEL_EXPORTER_OTLP_HEADERS",""))
+    auth_headers={"codex":bearer_header(codex_http.get("headers",{})),
+                  "claude_code":bearer_header(common_headers),
+                  "gemini_cli":bearer_header(common_headers),"qwen_code":bearer_header(common_headers)}
     result = {name: {**details, "configured": configured[name],
                      "requires_intervention": not configured[name],
+                     "auth_header_configured":auth_headers[name],"authenticated":None,"uploaded":None,
+                     "verification":"Configuration only; authentication and remote delivery require a received event ID",
                      "emitting": None} for name, details in REGISTRY.items()}
     if queue is not None:
         for event in queue.events():
             provider = event.get("agent", {}).get("id")
             if provider in result:
                 result[provider]["emitting"] = True
+                result[provider]["last_received"]=event.get("timestamp")
         for details in result.values():
             if details["emitting"] is None:
                 details["emitting"] = False
@@ -101,4 +116,6 @@ def configure(provider, port=8787):
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temp, path)
-    return {"changed": True, "backup": str(backup) if backup else None}
+    return {"changed": True, "backup": str(backup) if backup else None,
+            "delivery_verified":False,
+            "next_step":"Configure the per-user ingestion Bearer header in the provider's supported settings, then verify one exact event ID. Endpoint configuration alone does not verify delivery."}

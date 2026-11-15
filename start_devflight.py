@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 r"""Manage the DevFlight collector and optionally launch an OTLP-enabled Codex CLI.
 
-Place this file at the root of the DevFlight repository on Windows.
+Place this file at the root of the DevFlight repository. Service management works
+on Windows and Unix; opening a separate Codex CMD window is Windows-only.
 Usage:
     .venv\Scripts\python.exe start_devflight.py
     .venv\Scripts\python.exe start_devflight.py --status
@@ -60,11 +61,12 @@ def ensure_collector(port):
             return status
         args = [sys.executable, "-m", "devflight", "--home", str(QUEUE),
                 "collect", "--port", str(port), "--interval", "5"]
-        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         with LOG_PATH.open("ab") as logfile:
             proc = subprocess.Popen(
                 args, cwd=str(ROOT), env=os.environ.copy(), stdin=subprocess.DEVNULL,
                 stdout=logfile, stderr=subprocess.STDOUT, creationflags=flags,
+                start_new_session=os.name != "nt",
             )
         for _ in range(40):
             if proc.poll() is not None:
@@ -217,8 +219,8 @@ def main():
         parser.error("--configure is only valid with integrations")
     if args.with_codex and (args.action != "start" or args.only_collector or args.status):
         parser.error("--with-codex is only valid with start")
-    if os.name != "nt":
-        parser.error("This launcher is intended for Windows CMD/PowerShell")
+    if os.name != "nt" and args.with_codex:
+        parser.error("--with-codex opens a Windows CMD window; on Unix start the collector, then launch your configured client separately")
     if not (ROOT / "pyproject.toml").exists():
         parser.error("Save this file in the root of your DevFlight repository")
     try:

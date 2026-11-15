@@ -17,13 +17,18 @@ class RawTree:
         self.database = os.getenv("RAWTREE_DATABASE", "datathon_mathops")
         self.read_only = read_only
 
-    def request(self, path, payload, params=None, headers=None):
+    def request(self, path, payload, params=None, headers=None, *, timeout=None, deadline=None):
+        remaining = min(30.0, float(timeout) if timeout is not None else 30.0)
+        if deadline is not None:
+            remaining = min(remaining, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("RawTree query deadline exhausted")
         query = urllib.parse.urlencode({"database": self.database, **(params or {})})
         req = urllib.request.Request(self.base + path + "?" + query,
             data=json.dumps(payload, ensure_ascii=False).encode(), headers={
                 "Authorization": "Bearer " + self.key, "Content-Type": "application/json",
                 "x-rawtree-database": self.database, **(headers or {})})
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=max(0.001, remaining)) as response:
             return json.load(response)
 
     def insert(self, table, events, token):
@@ -39,10 +44,12 @@ class RawTree:
         if count is None or int(count) != len(events):
             raise RuntimeError("Unconfirmed batch: " + str(result))
 
-    def query(self, sql):
+    def query(self, sql, *, timeout=None, deadline=None):
         if not sql.lstrip().upper().startswith("SELECT "):
             raise ValueError("Only SELECT is allowed by the analyst")
-        return self.request("/v1/query", {"sql": sql})["data"]
+        if deadline is None and timeout is None:
+            return self.request("/v1/query", {"sql": sql})["data"]
+        return self.request("/v1/query", {"sql": sql}, timeout=timeout, deadline=deadline)["data"]
 
     def evaluations(self):
         sql = "SELECT event_json AS event FROM dev_events_raw WHERE event_type = 'eval.grade' ORDER BY timestamp, event_id LIMIT 100000"

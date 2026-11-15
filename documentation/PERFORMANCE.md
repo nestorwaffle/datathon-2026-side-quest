@@ -1,3 +1,5 @@
+> **Documento histórico:** los resultados y las afirmaciones de este archivo corresponden a la revisión anterior. No validan los cambios de fuente compartida/analista asíncrono. El estado y las comprobaciones pendientes de esta entrega están en [SHARED_SOURCE_AND_ANALYST.md](SHARED_SOURCE_AND_ANALYST.md).
+
 # Rendimiento y alcance de validación
 
 ## Hallazgos

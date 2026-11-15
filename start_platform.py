@@ -75,7 +75,8 @@ def main():
             with (HOME / "platform.log").open("ab") as logfile:
                 child = subprocess.Popen([sys.executable, "-m", "devflight.platform", "--home", str(HOME)],
                     cwd=ROOT, env=os.environ.copy(), stdin=subprocess.DEVNULL,
-                    stdout=logfile, stderr=subprocess.STDOUT, creationflags=flags)
+                    stdout=logfile, stderr=subprocess.STDOUT, creationflags=flags,
+                    start_new_session=os.name != "nt")
             for _ in range(40):
                 if child.poll() is not None: raise RuntimeError("Platform stopped; inspect .devflight/platform/platform.log")
                 if health(): break
