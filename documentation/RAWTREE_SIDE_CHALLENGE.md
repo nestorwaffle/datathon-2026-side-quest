@@ -54,10 +54,17 @@ Antes de la fecha limite, compartir un repositorio de codigo con README que expl
 
 ## Cómo DevFlight responde al reto
 
-DevFlight convierte a **RawTree en el cerebro de observabilidad central de todos los agentes de desarrollo** que construyen el proyecto de Qualcomm:
+DevFlight usa la fuente RawTree compartida para observar los agentes que construyen el reto principal y para investigar sus resultados.
 
-1. **Ingesta universal e indiscriminada:** Captura toda la actividad de los agentes de programación (Claude Code, Codex, scripts) mediante OpenTelemetry (OTLP) y la API/MCP de RawTree, sin importar quién los invoque o qué tareas ejecuten.
-2. **Explotación de la naturaleza OLAP sin esquema de RawTree:** Como las distintas herramientas y modelos de IA generan estructuras de datos heterogéneas (diferentes atributos, llamadas a herramientas, tokens, errores), RawTree es la solución idónea al ingerir JSONs sin esquema rígido previo y exponerlos como rutas SQL en tiempo real.
-3. **Resiliencia y Privacidad (Local-First):** Redacción automática de secretos en memoria antes de persistir y buffering durable en disco que permite seguir programando offline sin perder un solo evento.
-4. **Almacenamiento preparado para análisis posterior (Sin IA interna):** No se introducen agentes de IA adicionales para procesar los datos; el valor reside en consolidar la telemetría masiva en RawTree para que a posteriori analistas humanos o dashboards (como Crux) puedan auditar con SQL picos de consumo, costes por desarrollador y sesiones anómalas.
-5. **Conexión mediante MCP:** Los desarrolladores pueden consultar interactivamente la telemetría de RawTree directamente desde el chat de sus agentes de codificación utilizando el servidor MCP oficial de RawTree.
+1. **Ingesta declarada:** exportadores OTLP y SDK envían metadatos de las operaciones que realmente emiten. No se promete capturar actividad privada, todas las herramientas ni sesiones anteriores.
+2. **Fuente común:** el dashboard integra las tablas compatibles y los históricos autorizados. Los usuarios del mismo espacio pueden ver las estadísticas globales, con identidades de origen explícitas y límites de cobertura.
+3. **Investigación por IA:** Helmcode elige consultas estructuradas sobre actividad, errores, consumo, sesiones o experimentos. RawTree devuelve la evidencia; el modelo formula hallazgos e incertidumbres a partir de esos resultados.
+4. **Acción y verificación:** el usuario puede aprobar una vista privada de seguimiento desde la investigación. La aplicación la consulta y registra creación/verificación mediante el outbox. No se declara una acción exitosa cuando la consulta ha fallado.
+5. **Memoria observable:** se conservan pregunta, alcance, consultas SQL, resultados, progreso y consumo reportado. La conversación permite preguntas posteriores con contexto acotado. Los reintentos HTTP no relanzan una inferencia ya aceptada.
+6. **Decisiones sobre el reto principal:** el analista y la pestaña Experimentos pueden utilizar las evaluaciones agregadas del proyecto Qualcomm, indicando cuándo faltan datos para comparar variantes.
+
+El funcionamiento depende de una conexión real a RawTree y de un modelo Helmcode autorizado. Los errores y estados parciales se muestran. La cola local conserva los eventos aceptados y sus reintentos; los límites de capacidad y deduplicación están documentados.
+
+La captura no es indiscriminada: el esquema normalizado omite prompts, argumentos completos y razonamiento privado. Los desconocidos permanecen desconocidos y no se inventan costes ni identidades.
+
+[Guía de implementación y comprobación](SHARED_SOURCE_AND_ANALYST.md) · [Recorrido de demo](DEMO.md).

@@ -1,23 +1,34 @@
-﻿# Demo del producto integrado
+# Demo: RawTree compartido y decisiones del reto principal
 
-## Inicio
+Esta guía describe un recorrido para ejecutar con datos y claves reales. No afirma que esta revisión ya haya superado las pruebas.
 
-`devflight.cmd start` inicia el backend y reutiliza o inicia un único colector. Abrir `http://127.0.0.1:8788` e iniciar sesión con la credencial personal del archivo privado `.devflight/platform/admin.token`.
+## Preparación
 
-## Flujo para el jurado
+Arranca con `devflight.cmd start` (Windows) o `.venv/bin/python start_platform.py start` (Unix). Entra en [http://127.0.0.1:8788](http://127.0.0.1:8788) con la credencial local.
 
-1. Mostrar Overview y filtrar la sesión `b07066fb-8003-4f30-b235-ad393e2125fa` si se usa el entorno de esta implementación. No atribuir esos eventos SDK a una exportación completa de Codex.
-2. Ejecutar `.venv\Scripts\python.exe scripts/platform_demo.py --live`: compila realmente el código, registra el resultado, verifica el ID exacto en RawTree y en la API del dashboard e inicia una investigación Helmcode acotada.
-3. Abrir Sessions & Traces y seleccionar la sesión. Revisar eventos, IDs, duración y estado; las identidades de proveedor/modelo no emitidas permanecen desconocidas.
-4. Abrir AI Analyst y revisar la investigación nueva: herramientas elegidas, SQL autorizado, evidencia y conclusión. El registro queda en SQLite y en RawTree. No hay acciones automáticas sobre otros procesos.
-5. Abrir Data Explorer: escoger campos o agrupación, guardar una vista privada y exportar hasta 100 filas. La asignación de históricos requiere una acción explícita del propietario local para una traza exacta.
+En Configuración confirma el nombre/base de RawTree y la cobertura de tablas. Revisa la entrega local. El botón de comprobación del analista consulta el catálogo de Helmcode; la investigación posterior comprueba la inferencia.
 
-La demostración principal no fabrica errores ni actividad de un proveedor: analiza el trabajo de desarrollo capturado. Si no existen fallos, el analista debe indicar esa limitación. La opción de Settings para generar fixtures es explícitamente sintética y se marca en los datos y en Overview; no se necesita para el flujo real verificado.
+## Recorrido para el jurado
 
-## Alternativa de conexión limitada
+1. **Problema:** varios agentes y usuarios generan actividad dispersa durante el reto principal. Abre Inicio y Emisores para mostrar el agregado de la fuente compartida.
+2. **Historia real:** elige «Todo el historial», localiza una sesión y revisa IDs, herramientas y errores. Explica cualquier emisor desconocido.
+3. **RawTree como herramienta del agente:** pregunta en AI Analyst qué patrones de error aparecen y cómo verificarlos. Muestra los pasos de consulta elegidos por el modelo, la evidencia SQL y las incertidumbres.
+4. **Acción:** guarda una vista de seguimiento. Enseña su verificación y abre la vista en Explorer. Un fallo de consulta debe quedar visible.
+5. **Tukey y Qualcomm:** abre Experimentos con evaluaciones reales. Compara variantes solo cuando dataset/split/suite/hardware coincidan; usa idioma/tema/dificultad para justificar una decisión del proyecto principal.
+6. **Trazabilidad:** enseña el estado de envío y el registro de la investigación. Distingue recepción local de confirmación remota.
 
-`.venv\Scripts\python.exe scripts/platform_demo.py` reutiliza una investigación auditada y muestra `verified-history-replay-no-new-inference`. No ejecuta Helmcode ni debe presentarse como una nueva investigación. Para un corte de RawTree, una vista previamente consultada y guardada puede abrirse en `Verified snapshot mode` con exactamente sus mismos campos y filtros. Es evidencia histórica etiquetada, no una consulta en directo. El backend local debe seguir activo.
+No hace falta generar fixtures para esta historia. Si se usa la opción sintética de Configuración, sus datos deben identificarse como tales.
 
-Los presupuestos de Helmcode se configuran privadamente. Se seleccionó qwen3.6 incluido en el catálogo del plan, reasoning desactivado y salidas cortas. No publicar claves ni tokens de sesión durante la presentación.
+## Demo programática opcional
 
-Las presentaciones existentes no se regeneran ni forman parte de este commit.
+```cmd
+.venv\Scripts\python.exe scripts/platform_demo.py --live --followup-view
+```
+
+Realiza una compilación observada por SDK, busca el ID exacto en RawTree y en la API, envía una investigación asíncrona con alcance compartido, espera su estado final y comprueba su auditoría. `--followup-view` añade la acción y su verificación. Tiene plazos acotados y requiere las claves configuradas.
+
+`--scope organization` permite una demo limitada a una organización; no es el comportamiento global por defecto. `--hours 0` permite todo el histórico.
+
+Sin `--live`, exige una investigación previa y devuelve el modo `verified-history-replay-no-new-inference`. No se debe presentar como una nueva inferencia. Los snapshots de Explorer también se etiquetan como históricos.
+
+[Detalle técnico y recorrido de comprobación](SHARED_SOURCE_AND_ANALYST.md).

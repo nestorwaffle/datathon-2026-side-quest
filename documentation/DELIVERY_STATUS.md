@@ -1,3 +1,5 @@
+> **Documento histórico:** los resultados y las afirmaciones de este archivo corresponden a la revisión anterior. No validan los cambios de fuente compartida/analista asíncrono. El estado y las comprobaciones pendientes de esta entrega están en [SHARED_SOURCE_AND_ANALYST.md](SHARED_SOURCE_AND_ANALYST.md).
+
 # Checkpoint del producto
 
 Implementado: recuperación y seguridad del colector; FastAPI + React/TypeScript/Tailwind/ECharts; identidades SQLite WAL, organizaciones/equipos/proyectos/roles y claves personales; outbox durable a RawTree; consultas agregadas autorizadas, explorador, vistas, CSV y snapshots; AI Analyst Helmcode real con herramientas y auditoría; captura explícita del desarrollo por SDK.
