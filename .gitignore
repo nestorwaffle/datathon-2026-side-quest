@@ -10,3 +10,4 @@ tmp/
 api_keys.txt
 *.pptx.inspect.ndjson
 *.bak
+frontend/node_modules/

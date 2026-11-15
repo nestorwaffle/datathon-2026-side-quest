@@ -5,12 +5,42 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .core import Trace, redact, atomic_json
 from .rawtree import sync
 
 LIMIT = 4 * 1024 * 1024
+
+def validate_otlp(body, field):
+    """Validate protocol containers before accepting a durable payload."""
+    def objects(value, label):
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            raise ValueError("Invalid OTLP " + label)
+        return value
+
+    scope_keys, record_key = {
+        "resourceLogs": (("scopeLogs", "instrumentationLibraryLogs"), "logRecords"),
+        "resourceSpans": (("scopeSpans", "instrumentationLibrarySpans"), "spans"),
+        "resourceMetrics": (("scopeMetrics", "instrumentationLibraryMetrics"), "metrics"),
+    }[field]
+    for resource in objects(body.get(field), field):
+        if "resource" in resource and not isinstance(resource["resource"], dict):
+            raise ValueError("Invalid OTLP resource")
+        for scope_key in scope_keys:
+            for scope in objects(resource.get(scope_key, []), scope_key):
+                if "scope" in scope and not isinstance(scope["scope"], dict):
+                    raise ValueError("Invalid OTLP scope")
+                for record in objects(scope.get(record_key, []), record_key):
+                    if "attributes" in record:
+                        objects(record["attributes"], "attributes")
+                    if field == "resourceMetrics":
+                        for kind in ("gauge", "sum", "histogram", "exponentialHistogram", "summary"):
+                            if kind in record:
+                                if not isinstance(record[kind], dict):
+                                    raise ValueError("Invalid OTLP metric")
+                                objects(record[kind].get("dataPoints", []), "dataPoints")
 
 def otlp_identity(body, field):
     """Promote only explicit, unambiguous identities from known OTLP locations."""
@@ -70,8 +100,11 @@ def otlp_identity(body, field):
                                 collect(point)
     return {k: next(iter(v)) for k, v in values.items() if len(v) == 1}
 
-def make_server(queue, port=8787):
+def make_server(queue, port=8787, enterprise_store=None):
     queue.reconcile()
+    if enterprise_store is None and os.getenv("DEVFLIGHT_ENTERPRISE") == "1":
+        from .identity import Store
+        enterprise_store = Store(os.getenv("DEVFLIGHT_PLATFORM_HOME", ".devflight/platform"))
     slots = threading.BoundedSemaphore(32)
     control_path = queue.home / "control.key"
     if control_path.exists():
@@ -90,6 +123,10 @@ def make_server(queue, port=8787):
     if os.name != "nt":
         control_path.chmod(0o600)
     class Handler(BaseHTTPRequestHandler):
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(15)
+
         def log_message(self, *args): pass
 
         def reply(self, status, body):
@@ -104,13 +141,18 @@ def make_server(queue, port=8787):
             if host not in (f"localhost:{self.server.server_port}", f"127.0.0.1:{self.server.server_port}"):
                 return False
             if self.headers.get("Origin", "http://" + host) != "http://" + host: return False
+            if enterprise_store is not None and self.command == "POST" and (self.path == "/events" or self.path in ("/v1/logs", "/v1/traces", "/v1/metrics")):
+                # Per-user ingestion credentials are checked before reading the body.
+                return True
             token = os.getenv("DEVFLIGHT_HTTP_TOKEN")
             return not token or hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + token)
 
         def do_GET(self):
             if not self.authorized(): return self.reply(403, {"error": "Forbidden"})
             if self.path in ("/", "/health", "/status"):
-                return self.reply(200, {"service": "devflight-collector", "control_required": True, **queue.status()})
+                from .resources import snapshot
+                return self.reply(200, {"service": "devflight-collector", "control_required": True,
+                                        "enterprise":enterprise_store is not None,"process":snapshot(), **queue.status()})
             self.reply(404, {"error": "Not found"})
 
         def do_POST(self):
@@ -128,6 +170,17 @@ def make_server(queue, port=8787):
                 self.end_headers()
                 return
             try:
+                identity = None
+                if enterprise_store is not None:
+                    authorization = self.headers.get("Authorization", "")
+                    if not authorization.startswith("Bearer "):
+                        return self.reply(401, {"error": "Ingestion credential required"})
+                    try:
+                        identity = enterprise_store.authenticate(authorization[7:], purpose="ingest")
+                    except PermissionError:
+                        return self.reply(401, {"error": "Invalid ingestion credential"})
+                    if not identity:
+                        return self.reply(401, {"error": "Invalid ingestion credential"})
                 self.connection.settimeout(15)
                 if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
                     return self.reply(415, {"error": "Use OTLP HTTP JSON, not protobuf/gRPC"})
@@ -138,7 +191,10 @@ def make_server(queue, port=8787):
                 encoding = self.headers.get("Content-Encoding", "identity")
                 if encoding == "gzip":
                     import io
-                    with gzip.GzipFile(fileobj=io.BytesIO(raw)) as f: raw = f.read(LIMIT + 1)
+                    try:
+                        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as f: raw = f.read(LIMIT + 1)
+                    except (OSError, EOFError) as error:
+                        raise ValueError("Invalid gzip body") from error
                 elif encoding != "identity": return self.reply(415, {"error": "Unsupported content encoding"})
                 if len(raw) > LIMIT: return self.reply(413, {"error": "Decompressed body exceeds 4 MiB"})
                 body = json.loads(raw)
@@ -161,12 +217,18 @@ def make_server(queue, port=8787):
                     elif isinstance(agent,dict):
                         for key in ("id","model","framework"):
                             if isinstance(agent.get(key),str): trace.agent[key]=agent[key]
-                    event = trace.emit(body["event_type"], body.get("data",{}))
+                    if enterprise_store is not None:
+                        event = enterprise_store.ingest(identity, body)
+                    else:
+                        event = trace.emit(body["event_type"], body.get("data",{}))
                     return self.reply(201, {"event_id":event["event_id"]})
                 signal = self.path.rsplit("/",1)[-1]
                 field = {"traces":"resourceSpans", "logs":"resourceLogs", "metrics":"resourceMetrics"}.get(signal)
                 if self.path != "/v1/" + signal or field is None: return self.reply(404,{"error":"Not found"})
-                if not isinstance(body.get(field),list): raise ValueError("Missing " + field)
+                validate_otlp(body, field)
+                if enterprise_store is not None:
+                    enterprise_store.ingest_otlp(identity, signal, body)
+                    return self.reply(200, {})
                 # Preserve original resource attributes: a batch may contain multiple developers/sessions.
                 trace.agent["framework"] = "opentelemetry"
                 identity = otlp_identity(body, field)
@@ -177,16 +239,18 @@ def make_server(queue, port=8787):
                 trace.developer_id = identity.get("developer.id")
                 trace.emit("otel."+signal,body)
                 self.reply(200,{})
-            except OSError:
+            except (OSError, sqlite3.Error):
                 self.send_response(503)
                 self.send_header("Retry-After", "5")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
-            except (ValueError, TypeError, KeyError) as error:
+            except (ValueError, TypeError, KeyError, RecursionError) as error:
                 self.reply(400,{"error":str(error)})
             finally:
                 slots.release()
-    return ThreadingHTTPServer(("127.0.0.1",port),Handler)
+    server = ThreadingHTTPServer(("127.0.0.1",port),Handler)
+    server.enterprise_store = enterprise_store
+    return server
 
 def serve(queue, port=8787, interval=5):
     if interval <= 0: raise ValueError("interval must be positive")

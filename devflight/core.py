@@ -79,7 +79,16 @@ def atomic_json(path, value):
         json.dump(redact(value), f, ensure_ascii=False, allow_nan=False)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # Windows scanners can briefly open the destination without delete sharing.
+    # Keep the durable temporary file and retry only this transient replace error.
+    for attempt in range(7):
+        try:
+            os.replace(tmp, path)
+            break
+        except PermissionError:
+            if os.name != "nt" or attempt == 6:
+                raise
+            time.sleep(min(.005 * 2 ** attempt, .05))
 
 @contextlib.contextmanager
 def file_lock(path):

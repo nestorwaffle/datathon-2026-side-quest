@@ -1,14 +1,23 @@
-﻿# Demo de fase 1 y presentación
+﻿# Demo del producto integrado
 
-Duración del pitch: aproximadamente 3 minutos. El guion y las fuentes están en las notas de las ocho diapositivas de `deliverables/Datathon_2026_Final_Pitch.pptx`.
+## Inicio
 
-## Demostración técnica breve
+`devflight.cmd start` inicia el backend y reutiliza o inicia un único colector. Abrir `http://127.0.0.1:8788` e iniciar sesión con la credencial personal del archivo privado `.devflight/platform/admin.token`.
 
-1. Mostrar `start_devflight.py status`: colector, cola local y contadores remotos, con sus fuentes diferenciadas.
-2. Ejecutar `.venv\Scripts\python.exe scripts/rawtree_verify.py --home .devflight/demo-verification`. Necesita las claves privadas configuradas en `.env`. Produce ocho eventos pequeños de prueba y recupera su contenido exacto y un artefacto. No llama a modelos. Repetir crea un nuevo conjunto pequeño, no un benchmark de carga.
-3. Mostrar `verified=true`, el identificador de traza y la consulta concreta. Los eventos están identificados por el agente `live-probe`; no son actividad de un usuario real.
-4. Consultar RawTree mediante SQL/MCP: contar spans y pares de IDs únicos; agrupar por operación. La evidencia de esta entrega figura en VALIDATION.md. No presentar el histórico como una sola sesión.
+## Flujo para el jurado
 
-El AI Analyst autónomo integrado y el dashboard empresarial no están incluidos. Un agente externo puede usar el MCP oficial de RawTree para decidir consultas, pero eso no prueba un ciclo autónomo de producto. No se simula dicho ciclo con respuestas fijas.
+1. Mostrar Overview y filtrar la sesión `b07066fb-8003-4f30-b235-ad393e2125fa` si se usa el entorno de esta implementación. No atribuir esos eventos SDK a una exportación completa de Codex.
+2. Ejecutar `.venv\Scripts\python.exe scripts/platform_demo.py --live`: compila realmente el código, registra el resultado, verifica el ID exacto en RawTree y en la API del dashboard e inicia una investigación Helmcode acotada.
+3. Abrir Sessions & Traces y seleccionar la sesión. Revisar eventos, IDs, duración y estado; las identidades de proveedor/modelo no emitidas permanecen desconocidas.
+4. Abrir AI Analyst y revisar la investigación nueva: herramientas elegidas, SQL autorizado, evidencia y conclusión. El registro queda en SQLite y en RawTree. No hay acciones automáticas sobre otros procesos.
+5. Abrir Data Explorer: escoger campos o agrupación, guardar una vista privada y exportar hasta 100 filas. La asignación de históricos requiere una acción explícita del propietario local para una traza exacta.
 
-Para Qualcomm, solo mostrar una ejecución en placa y accuracy si el equipo aporta esas evidencias. El pitch marca ≈46 % como provisional. El dataset de investigación, imágenes y modelos no se distribuyen en esta entrega.
+La demostración principal no fabrica errores ni actividad de un proveedor: analiza el trabajo de desarrollo capturado. Si no existen fallos, el analista debe indicar esa limitación. La opción de Settings para generar fixtures es explícitamente sintética y se marca en los datos y en Overview; no se necesita para el flujo real verificado.
+
+## Alternativa de conexión limitada
+
+`.venv\Scripts\python.exe scripts/platform_demo.py` reutiliza una investigación auditada y muestra `verified-history-replay-no-new-inference`. No ejecuta Helmcode ni debe presentarse como una nueva investigación. Para un corte de RawTree, una vista previamente consultada y guardada puede abrirse en `Verified snapshot mode` con exactamente sus mismos campos y filtros. Es evidencia histórica etiquetada, no una consulta en directo. El backend local debe seguir activo.
+
+Los presupuestos de Helmcode se configuran privadamente. Se seleccionó qwen3.6 incluido en el catálogo del plan, reasoning desactivado y salidas cortas. No publicar claves ni tokens de sesión durante la presentación.
+
+Las presentaciones existentes no se regeneran ni forman parte de este commit.

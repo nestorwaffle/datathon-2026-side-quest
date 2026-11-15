@@ -21,7 +21,7 @@ def _json_settings(path):
     except (OSError, ValueError):
         return {}
 
-def report(queue=None):
+def report(queue=None, port=8787):
     home = Path.home()
     try:
         codex = tomllib.loads((home / ".codex" / "config.toml").read_text(encoding="utf-8"))
@@ -34,7 +34,7 @@ def report(queue=None):
     def local(endpoint):
         try:
             parsed = urlsplit(str(endpoint))
-            return parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost") and parsed.port == 8787
+            return parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost") and parsed.port == port
         except ValueError:
             return False
     configured = {

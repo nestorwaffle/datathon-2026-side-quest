@@ -20,6 +20,75 @@ from start_devflight import remote_status
 
 
 class ReliabilityTests(unittest.TestCase):
+    @unittest.skipUnless(os.name=="nt","Windows transient file sharing")
+    def test_atomic_replace_retries_transient_windows_permission_error(self):
+        with tempfile.TemporaryDirectory() as home:
+            path=Path(home)/'state.json'
+            replace=os.replace
+            calls=[]
+            def transient(source,destination):
+                calls.append(1)
+                if len(calls)==1: raise PermissionError('temporarily held by scanner')
+                return replace(source,destination)
+            with patch('devflight.core.os.replace',side_effect=transient): atomic_json(path,{'confirmed':True})
+            self.assertEqual(json.loads(path.read_text()),{'confirmed':True})
+            self.assertEqual(len(calls),2)
+    def test_malformed_otlp_and_gzip_are_rejected_without_persistence(self):
+        with tempfile.TemporaryDirectory() as home:
+            queue = Queue(home)
+            server = make_server(queue, 0)
+            runner = threading.Thread(target=server.serve_forever, daemon=True)
+            runner.start()
+            try:
+                cases = [(b"not gzip", {"Content-Encoding": "gzip"}),
+                         (b'{"resourceLogs":[7]}', {}),
+                         (b'{"resourceLogs":[{"scopeLogs":[{"logRecords":[null]}]}]}', {}),
+                         (b'{"resourceLogs":' + b'[' * 1500 + b']' * 1500 + b'}', {})]
+                for raw, extra in cases:
+                    request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/v1/logs", data=raw,
+                        headers={"Content-Type": "application/json", **extra})
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertEqual(error.exception.code, 400)
+                self.assertEqual(queue.events(), [])
+            finally:
+                server.shutdown()
+                server.server_close()
+                runner.join(5)
+
+    def test_enterprise_sink_authenticates_before_accepting_otlp(self):
+        class Store:
+            def __init__(self): self.accepted = []
+            def authenticate(self, token, purpose):
+                if token != "trusted-ingest-key" or purpose != "ingest": raise PermissionError()
+                return {"org_id": "trusted-org", "user_id": "trusted-user"}
+            def ingest_otlp(self, identity, signal, body):
+                self.accepted.append((identity, signal, body))
+        with tempfile.TemporaryDirectory() as home:
+            queue = Queue(home)
+            store = Store()
+            server = make_server(queue, 0, enterprise_store=store)
+            runner = threading.Thread(target=server.serve_forever, daemon=True)
+            runner.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/v1/logs"
+                body = b'{"org_id":"attacker-org","resourceLogs":[]}'
+                for token in (None, "wrong"):
+                    headers = {"Content-Type": "application/json"}
+                    if token: headers["Authorization"] = "Bearer " + token
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(urllib.request.Request(url, data=body, headers=headers), timeout=5)
+                    self.assertEqual(error.exception.code, 401)
+                request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "Authorization": "Bearer trusted-ingest-key"})
+                with urllib.request.urlopen(request, timeout=5) as response: self.assertEqual(response.status, 200)
+                self.assertEqual(len(store.accepted), 1)
+                self.assertEqual(store.accepted[0][0]["org_id"], "trusted-org")
+                self.assertEqual(queue.events(), [])
+            finally:
+                server.shutdown()
+                server.server_close()
+                runner.join(5)
+
     def test_otlp_record_identities_and_resource_conflicts(self):
         def attrs(**pairs):
             return {"attributes": [{"key": key, "value": {"stringValue": value}} for key, value in pairs.items()]}

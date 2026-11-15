@@ -42,3 +42,15 @@ MCP RawTree: 11.215 spans históricos y 11.215 pares de IDs distintos, 935 trace
 | Transferencia de red | 0 | 0 |
 
 No se observa una aceleración de escritura en esta pequeña muestra; el control de recuperación adicional tiene coste. No se ha eliminado fsync para obtener una mejora artificial. El cambio principal corrige pérdida tras checkpoint/manifiesto interrumpido y reduce recorridos por lote. Sin una prueba interactiva de Codex no se certifica sobrecarga imperceptible.
+
+## Producto integrado 0.2
+
+57 regresiones pasan. La cola enterprise utiliza SQLite WAL/FULL, índice de pendientes y manifiesto de lote persistido antes de la subida. Su prueba de timeout ambiguo incorpora nuevos eventos entre reintentos y verifica que la identidad del lote no cambia. El histórico legacy sigue conservado y separado.
+
+Cinco productores SQLite concurrentes, reapertura y aislamiento de sesión están cubiertos por regresión. El límite de almacenamiento enterprise por defecto es 512 MiB; el archivado optativo conserva payloads confirmados en gzip y no toca pendientes. No se afirma capacidad ilimitada.
+
+Medición real orientativa del backend FastAPI activo: 55,94 MiB de memoria residente y 0,0 s de CPU adicional durante 2 segundos de reposo. No se midió una jornada completa ni latencia interactiva de Codex. Se mantuvo fsync/FULL antes de confirmar persistencia.
+
+Las consultas de dashboard se agregan y paginan en RawTree; caché de resultados de 5 s por alcance autorizado y esquema de 10 s. Los snapshots se limitan a 200 entradas y se etiquetan como resultados históricos verificados. Los contadores cumulativos OTLP no se suman como usage; los valores no emitidos permanecen null.
+
+La investigación live final empleó qwen3.6 con reasoning desactivado: 2 iteraciones, 2 consultas y 2.885 tokens reportados en total. No se convierte ese consumo a dinero sin una tarifa verificada. Las consultas del dashboard/collector y el tráfico del analista no disparan recursivamente investigaciones automáticas.

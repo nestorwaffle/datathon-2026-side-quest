@@ -1,9 +1,11 @@
-# Checkpoint de entrega
+# Checkpoint del producto
 
-Fase 1: implementada y 37 pruebas locales aprobadas; prueba real RawTree de ocho eventos y restauración de artefacto aprobada. No certificada sobrecarga interactiva ni integración real simultánea con cuatro proveedores. Histórico conservado; límite de disco optativo sin eliminación automática.
+Implementado: recuperación y seguridad del colector; FastAPI + React/TypeScript/Tailwind/ECharts; identidades SQLite WAL, organizaciones/equipos/proyectos/roles y claves personales; outbox durable a RawTree; consultas agregadas autorizadas, explorador, vistas, CSV y snapshots; AI Analyst Helmcode real con herramientas y auditoría; captura explícita del desarrollo por SDK.
 
-Fase 2: PPTX editable y PDF de ocho diapositivas creados, renderizados y revisados; notas ~3 min. Referencia Qualcomm oficial f1ae321 y repo documental a99c11b. Accuracy ~46 % provisional; no evidencia del despliegue del equipo.
+Verificación: 57 tests pasan; build frontend y npm audit aprobados; diez rutas reales devuelven 200; demo live e investigación remota por IDs concretos aprobadas. VALIDATION.md contiene evidencia y límites.
 
-Fase 3: entrega publicada en main, commit 01d5d803b8219a28e4a82ed20b2d913457e70b9e; git ls-remote confirmó el mismo SHA en GitHub. Sin force push. Este checkpoint se registra en un commit posterior de documentación.
+Ejecución observada: b07066fb-8003-4f30-b235-ad393e2125fa. Investigación live: 8df677f3-0222-4265-b42b-60965a5559cc. Cobertura parcial por SDK, sin prompts/código ni reconstrucción retroactiva.
 
-Fase 4: no iniciada, conforme a las prioridades del usuario.
+Límites: host de navegador no disponible; sobrecarga interactiva de Codex no medida; proveedores ausentes sin sesión real certificada; colector legacy existente conservado, ingesta autenticada disponible en 8788; despliegue local, sin certificación para exposición pública.
+
+Presentaciones y Qualcomm intactos. El commit de este checkpoint contiene el producto integrado. La publicación se verifica contra main en GitHub; las claves y el estado de captura permanecen fuera de Git.

@@ -1,9 +1,11 @@
-﻿# Documentación de la entrega
+﻿# Documentación operativa
 
-La documentación operativa actual es el [README principal](../README.md), [PERFORMANCE](PERFORMANCE.md) y [VALIDATION](VALIDATION.md). Los documentos de visión o planificación anteriores son contexto histórico; no representan funciones terminadas.
+[README](../README.md): instalación, arranque, integraciones y límites actuales.
 
-- [Enunciado oficial RawTree](RawTree%20-%20Side%20challenge.pdf).
-- [Demo verificada](DEMO.md).
-- [Pitch editable](../deliverables/Datathon_2026_Final_Pitch.pptx) y [PDF](../deliverables/Datathon_2026_Final_Pitch.pdf).
-- [Contexto del equipo Qualcomm](QUALCOMM_CONTEXT.md): notas, no certificado de evaluación ni despliegue.
-- [Referencia oficial Qualcomm](https://github.com/mpous/datathon-UPC-maths-qualcomm-arduino-unoq): utilizada únicamente para la presentación.
+- [VALIDATION](VALIDATION.md): pruebas y evidencia real del producto integrado.
+- [PERFORMANCE](PERFORMANCE.md): mediciones y garantías de durabilidad.
+- [DEMO](DEMO.md): demostración live y reproducción etiquetada de evidencia histórica.
+- [DELIVERY_STATUS](DELIVERY_STATUS.md): checkpoint para reanudar.
+- El PDF oficial de RawTree y los documentos antiguos de contexto se conservan como fuentes históricas. Los planes anteriores no certifican funcionalidades actuales.
+
+Las presentaciones existentes y el proyecto Qualcomm no se modifican en esta entrega.
