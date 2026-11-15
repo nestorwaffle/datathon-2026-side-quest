@@ -2,13 +2,11 @@
 
 Plataforma local de observabilidad para DATATHON. El dashboard consulta **todos los emisores, agentes y sesiones de la fuente RawTree autorizada**, incluidos los históricos de las tablas compatibles. El inicio de sesión controla el acceso; no convierte la sesión del navegador en el universo de datos.
 
-## Presentación y demo final
+## Demo final
 
-- [Presentación HTML](deliverables/DevFlight_Pitch.html): ocho diapositivas con transiciones; se avanza con las flechas, espacio o un clic. Descarga también `deliverables/pitch-assets/` para abrirla sin conexión.
-- [PowerPoint editable](deliverables/DevFlight_Pitch.pptx): mismo relato, preparado para pasar diapositivas.
 - [Vídeo final](deliverables/DEMO_FINAL.mp4): demostración grabada de DevFlight, RawTree, AI Analyst y la acción de seguimiento.
 
-Las cifras de la presentación son una instantánea del 15 de noviembre de 2026. La investigación de AI Analyst que aparece en pantalla es un análisis anterior, guardado con evidencia. El proyecto Qualcomm solo se menciona en el cierre como fuente complementaria de actividad.
+Las cifras de la demo son una instantánea del 15 de noviembre de 2026. La investigación de AI Analyst que aparece en pantalla es un análisis anterior, guardado con evidencia.
 
 RawTree conserva los eventos analíticos. FastAPI aplica permisos y construye SQL. React muestra las estadísticas y un analista conversacional conectado a Helmcode. SQLite guarda identidades, trabajos del analista, vistas privadas y una cola de envío durable.
 
@@ -23,7 +21,7 @@ RawTree conserva los eventos analíticos. FastAPI aplica permisos y construye SQ
 - **Explorer:** tabla virtual `dev_all_events`, tablas individuales, filtros, agrupaciones, paginación, CSV y vistas privadas.
 - **Entrega visible:** pendientes, antigüedad, último intento, última confirmación y error. Aceptación local, confirmación de escritura y visibilidad en una consulta son estados diferentes.
 
-La aplicación se sirve en español. La presentación de DevFlight y el vídeo final están en `deliverables/`.
+La aplicación se sirve en español. El vídeo final está en `deliverables/`.
 
 ## Instalar y arrancar
 

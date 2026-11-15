@@ -11,3 +11,9 @@ api_keys.txt
 *.pptx.inspect.ndjson
 *.bak
 frontend/node_modules/
+
+# Local-only presentation files.
+deliverables/DevFlight_Pitch.html
+deliverables/DevFlight_Pitch.pptx
+deliverables/pitch-assets/
+scripts/build_devflight_pitch.mjs

@@ -9,4 +9,4 @@
 - [DELIVERY_STATUS](DELIVERY_STATUS.md): checkpoint histórico anterior a esta revisión.
 - El PDF oficial de RawTree y los documentos antiguos de contexto se conservan como fuentes históricas. Los planes anteriores no certifican funcionalidades actuales.
 
-La presentación de DevFlight y el vídeo final están en `deliverables/`. El proyecto principal permanece documentado por separado.
+El vídeo final de DevFlight está en `deliverables/`. El proyecto principal permanece documentado por separado.
