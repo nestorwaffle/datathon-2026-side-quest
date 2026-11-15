@@ -1,172 +1,73 @@
-# Observabilidad de Agentes de IA con RawTree y OpenTelemetry (DevFlight)
+﻿# DevFlight — AI Agent Telemetry
 
-## Servicio Windows
+DevFlight es el side challenge de RawTree del equipo Relus (Etna, Guillem y Nestor) en la FME Datathon 2026. Hace observable el trabajo de agentes de programación: sesiones, herramientas, errores, modelos, tokens y duraciones cuando el proveedor los emite.
 
-Iniciar sin abrir ningún agente: `.venv\Scripts\python.exe start_devflight.py start`
-
-Consultar estado: `.venv\Scripts\python.exe start_devflight.py status`
-
-Detener: `.venv\Scripts\python.exe start_devflight.py stop`. Diagnóstico: `.venv\Scripts\python.exe start_devflight.py doctor`. Registro de proveedores: `.venv\Scripts\python.exe start_devflight.py integrations`. El colector escucha solo en `127.0.0.1:8787` y mantiene la cola durable en `.devflight/telemetry`.
-
-Codex CLI requiere configurar su exportador OTLP/HTTP JSON hacia `http://127.0.0.1:8787/v1/logs` y, si se usan trazas, `http://127.0.0.1:8787/v1/traces` en la configuración de usuario. Claude Code requiere configurar `OTEL_LOGS_EXPORTER=otlp`, `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` y `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:8787` en el entorno del usuario antes de iniciar nuevas sesiones. Si se configura `DEVFLIGHT_HTTP_TOKEN`, los exportadores deben enviar el encabezado `Authorization: Bearer ...`. Los agentes ya abiertos deben reiniciarse. La captura depende de que cada proveedor emita OTLP; no se inspeccionan procesos ni tráfico. Véase [rendimiento](documentation/PERFORMANCE.md).
-
-Gemini CLI admite OTLP/HTTP JSON mediante sus ajustes `telemetry.enabled`, `telemetry.otlpEndpoint`, `telemetry.otlpProtocol` y `telemetry.traces=false`; Qwen Code dispone de `QWEN_TELEMETRY_ENABLED`, `QWEN_TELEMETRY_OTLP_ENDPOINT` y `QWEN_TELEMETRY_OTLP_PROTOCOL=http`. Ambas integraciones requieren configuración inicial del usuario y reinicio de sesiones. DevFlight no altera automáticamente los ajustes globales: cualquier edición exige autorización previa y backup. `integrations` informa del estado detectable; una configuración que apunta a otro puerto o backend no cuenta como conectada. Otros agentes solo se capturan si ofrecen un exportador OTLP/JSON, hook o SDK compatible configurado por el usuario. El perfil `essential` de `start --with-codex` habilita logs sin trazas internas; `DEVFLIGHT_CAPTURE_PROFILE=detailed` o `debug` habilita además trazas de Codex. Estos perfiles no cambian la configuración global de otros proveedores.
-
-**Fase actual: captura e ingesta, sin dashboard ni analista.** Guía operativa: [TELEMETRY_QUICKSTART.md](documentation/TELEMETRY_QUICKSTART.md). Usar `fme-trace collect` para el receptor dedicado y `fme-trace run` para agentes CLI; `run` sincroniza automáticamente al terminar. El servidor `serve` pertenece a la demo anterior.
-
-Plataforma de observabilidad y centralización de telemetría para **agentes y subagentes de desarrollo con IA (Claude Code, Codex, Cursor, CLI)** hacia **RawTree**, utilizando **OpenTelemetry (OTLP)** y una cola local durable.
-
-Este proyecto actúa como un **complemento totalmente independiente** al reto principal de Qualcomm (Math Copilot en Arduino UNO Q): su misión es capturar, proteger y almacenar de forma indiscriminada toda la telemetría de las IAs y herramientas que los desarrolladores utilizan durante la construcción del proyecto Qualcomm, dejándola estructurada y disponible en RawTree para análisis analíticos y consultas SQL posteriores.
-
----
-
-## Propósito y Filosofía del Proyecto
-
-1. **Problema:** En equipos u organizaciones donde múltiples programadores utilizan agentes de IA en paralelo (Claude Code, Codex, scripts autónomos), no hay visibilidad centralizada sobre el volumen de tokens consumido, la frecuencia de llamadas a herramientas, los errores o los picos anómalos de gasto.
-2. **Nuestra Solución:** Un pipeline de telemetría agnóstico que recibe indiscriminadamente todos los eventos emitidos por las herramientas de desarrollo mediante OpenTelemetry (OTLP) o HTTP, los almacena localmente en una cola durable resistente a fallos de conexión, y los ingiere en **RawTree (Tinybird OLAP)** sin requerir un esquema estricto previo.
-3. **Sin agentes de IA internos:** **Este proyecto no utiliza LLMs ni APIs externas de IA para analizar los datos.** No se requiere machine learning ni modelos adicionales. El valor reside en la captura fiel, redacción de secretos, resiliencia offline y almacenamiento OLAP en RawTree, permitiendo que analistas humanos o herramientas SQL auditen los patrones de uso a posteriori.
-4. **Conexión con los Agentes (MCP y OTLP):** Los agentes de programación (Claude Code, Codex, etc.) se conectan a este ecosistema mediante exportadores estándar de OpenTelemetry y el servidor MCP de RawTree para registrar y consultar telemetría.
-
----
+**Entrega actual: captura, persistencia offline, sincronización y consulta.** No incluye un dashboard empresarial ni un AI Analyst autónomo terminado. El proyecto matemático Qualcomm es independiente y no necesita RawTree para funcionar offline.
 
 ## Arquitectura
 
 ```mermaid
 flowchart LR
-    subgraph DevEnvironment["Entorno de Desarrollo"]
-        A1["Claude Code"] 
-        A2["Codex / Cursor"]
-        A3["Scripts / CLI Dev"]
-    end
-
-    subgraph DevFlight["Colector Local DevFlight"]
-        B["Receptor OTLP / HTTP<br/>(:8787)"]
-        C["Filtro de Privacidad<br/>(Redacción de secretos)"]
-        D[("Cola Local Durable<br/>(JSONL con fsync / locks)")]
-    end
-
-    subgraph CloudRawTree["Almacén RawTree (OLAP)"]
-        E["RawTree Ingestion API<br/>(dev_events_raw / dev_artifacts_raw)"]
-        F["App OpenTelemetry<br/>(dev_traces / dev_logs / dev_metrics)"]
-    end
-
-    subgraph ConsumoPosterior["Análisis a Posteriori (Sin IA)"]
-        G["Consultas SQL"]
-        H["Detección de Picos y Costes"]
-        I["Dashboard (Crux / BI)"]
-    end
-
-    DevEnvironment -->|OTLP JSON / HTTP| B
-    B --> C
-    C --> D
-    D -->|Sync por lotes con deduplicación| E
-    D -->|Sync OTLP| F
-    CloudRawTree --> G
-    CloudRawTree --> H
-    CloudRawTree --> I
+  A[Codex / Claude Code / Gemini CLI / Qwen Code] -->|Integración oficial OTLP HTTP JSON| B[Colector local único]
+  S[SDK Python / eventos HTTP] --> B
+  B --> R[Redacción de secretos]
+  R --> Q[Cola durable JSONL + segmentos gzip]
+  Q -->|Hilo separado: manifiesto y reintentos| T[RawTree]
+  T --> N[dev_logs / dev_traces / dev_metrics]
+  T --> E[dev_events_raw / dev_artifacts_raw]
+  N --> C[Consultas SQL o MCP por agentes]
+  E --> C
 ```
 
----
+OTLP solo se envía a sus tablas nativas; los sobres se conservan localmente. Los eventos SDK/HTTP van a `dev_events_raw`. Los artefactos tienen una tabla adicional para restauración. El colector confirma HTTP después de escritura durable; ninguna petición espera a una subida a RawTree.
 
-## Inicio Rápido
+## Windows CMD
 
-### 1. Variables de entorno (`.env`)
-Configura las credenciales de RawTree en el archivo `.env` (basado en `.env.example`, cargado automáticamente por los scripts):
+Requiere Python 3.11 o posterior. El runtime no tiene dependencias externas.
 
-```env
-RAWTREE_API_KEY=<clave-de-ingesta>
-RAWTREE_READ_KEY=<clave-de-lectura>
-RAWTREE_BASE_URL=https://api.rawtree.com
-RAWTREE_DATABASE=datathon_mathops
-DEVFLIGHT_HOME=.devflight
-DEVFLIGHT_OFFLINE=0
+```cmd
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
+copy .env.example .env
+.venv\Scripts\python.exe start_devflight.py start
+.venv\Scripts\python.exe start_devflight.py status
 ```
 
-### 2. Iniciar el receptor de telemetría local
-Ejecuta el servicio de ingestión (escucha en `http://127.0.0.1:8787`):
+Configura las claves privadas de ingesta y lectura en `.env`. Nunca se deben subir a Git. `start` inicia silenciosamente un único colector en segundo plano, sin abrir agentes. `stop` solicita una parada autenticada; `doctor` comprueba configuración y acceso remoto. `start --with-codex` abre una sesión opcional de Codex sin alterar su configuración global. El launcher PowerShell histórico delega en este mismo punto de entrada.
 
-```powershell
-./.venv/Scripts/fme-trace.exe --home .devflight/telemetry collect --port 8787
+## Integraciones y privacidad
+
+`integrations` informa de ajustes detectables y actividad local. `integrations --configure codex` (también `gemini_cli` o `qwen_code`) muestra el cambio de telemetría, pide `YES`, crea un backup y escribe atómicamente. Si ya hay ajustes de telemetría, exige una fusión manual. No modifica automáticamente configuraciones del usuario.
+
+- **Codex CLI:** exportador `otel.exporter` OTLP/HTTP JSON a `/v1/logs`. El perfil `essential` desactiva explícitamente `otel.trace_exporter`, incluso ante ajustes heredados. `DEVFLIGHT_CAPTURE_PROFILE=detailed` o `debug` habilita trazas; ambos conservan los límites y la redacción.
+- **Claude Code:** configuración manual de entorno de usuario: `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_LOGS_EXPORTER=otlp`, `OTEL_METRICS_EXPORTER=otlp`, `OTEL_EXPORTER_OTLP_PROTOCOL=http/json` y endpoint local `http://127.0.0.1:8787`. No confundir configuración detectable con sesión verificada.
+- **Gemini CLI:** ajustes oficiales `telemetry.enabled`, `otlpEndpoint`, `otlpProtocol=http`, `logPrompts=false` y `traces=false`.
+- **Qwen Code:** ajustes oficiales de telemetría HTTP/JSON y `logPrompts=false`. Los controles de trazas dependen de la versión del proveedor.
+- **Otros clientes:** OTLP/HTTP JSON, SDK Python `Queue`/`Trace` o `/events`. No hay captura universal, inspección de procesos ni interceptación de tráfico.
+
+Los agentes necesitan una nueva sesión después de configurar su exportador. Si se usa `DEVFLIGHT_HTTP_TOKEN`, deben enviar `Authorization: Bearer …`. El servicio solo escucha en loopback, valida Host/Origin y protege `/shutdown` además con una clave local. En Windows los permisos del directorio siguen las ACL del usuario: no compartir `.devflight`. La redacción no equivale a una política DLP completa; no habilitar prompts/código sensible en el proveedor. Los valores ausentes no son consumo cero; el JSON heterogéneo y los null explícitos se preservan.
+
+## Durabilidad y límites
+
+Secuencia recuperable, manifiestos durables, cursor confirmado y tokens de deduplicación estables. Los errores parciales OTLP dejan el lote pendiente. Hasta 32 solicitudes de ingesta activas, cuerpos de hasta 4 MiB; saturación o fallo de disco devuelve `503` con `Retry-After`.
+
+`DEVFLIGHT_MAX_QUEUE_BYTES` limita opcionalmente los archivos de telemetría; `0` conserva histórico sin límite. Al llenarse, no borra datos: rechaza nuevas confirmaciones para que el exportador reintente. El proveedor puede agotar sus propios reintentos. No hay eliminación automática por retención; el estado confirmado se compacta mediante cursor y los segmentos se comprimen. Los logs/manifiestos no se incluyen en este límite. Un ciclo de sync aún carga una instantánea del histórico: no es una cola indexada de escala ilimitada.
+
+## Pruebas y demostración
+
+```cmd
+.venv\Scripts\python.exe -m unittest discover -s tests -q
+.venv\Scripts\python.exe scripts/rawtree_verify.py --home .devflight/demo-verification
 ```
 
-### 3. Configurar OpenTelemetry en los agentes / herramientas
-Cualquier proceso o agente instrumentado con OpenTelemetry puede enviar sus trazas y métricas configurando los endpoints estándar:
+La segunda orden requiere RawTree y genera solo ocho eventos de prueba identificados por agente `live-probe`; recupera por SQL esos eventos y un artefacto. No consume tokens de modelos. Los tests usan colas temporales y clientes simulados para reintentos, además de HTTP local real. [Resultados y límites](documentation/VALIDATION.md), [rendimiento](documentation/PERFORMANCE.md).
 
-```sh
-export OTEL_EXPORTER_OTLP_PROTOCOL="http/json"
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:8787"
-```
+## Uso agéntico y entrega
 
-El receptor local acepta `/v1/traces`, `/v1/logs`, `/v1/metrics` y `/events` genéricos.
+RawTree admite JSON heterogéneo, tablas OTLP y consultas SQL/MCP. Un agente conectado a su MCP puede investigar su historial: por ejemplo, agrupar spans por operación y comparar `count()` con `uniqExact(tuple(traceId, spanId))` para distinguir volumen interno de duplicación. La investigación de esta entrega se realizó con consultas reales; un AI Analyst autónomo integrado es trabajo pendiente. No se presenta como implementado.
 
-### 4. Sincronizar hacia RawTree
-Para vaciar la cola local hacia las tablas de RawTree:
+El enunciado pide que el agente protagonice la ingesta, consulta y decisión; la fase actual aporta la base de datos y captura verificadas para ese objetivo, pero aún no cumple por sí sola todo el ciclo autónomo. [Enunciado oficial](documentation/RawTree%20-%20Side%20challenge.pdf).
 
-```powershell
-./.venv/Scripts/fme-trace.exe --home .devflight/telemetry sync
-```
+[Pitch editable](deliverables/Datathon_2026_Final_Pitch.pptx) · [Pitch PDF](deliverables/Datathon_2026_Final_Pitch.pdf). Ocho diapositivas con notas para unos tres minutos. El ≈46 % comunicado para Qualcomm sigue provisional; no se localizó una evaluación reproducible ni se verificó el despliegue del equipo en UNO Q. Los archivos `copilot/`, `board/` y sus herramientas se conservan por compatibilidad, sin cambios en esta entrega.
 
----
-
-## Qué Datos se Almacenan Indiscriminadamente en RawTree
-
-RawTree almacena los eventos semiestructurados sin forzar tipos rígidos:
-- **Metadatos de sesión:** `timestamp`, `developer_id`, `session_id`, `agent_id`, `model`.
-- **Cómputo y costes:** Tokens de prompt, tokens de respuesta, tokens en caché y latencias.
-- **Herramientas invocadas:** Nombres de herramientas, argumentos pasados y respuestas devueltas.
-- **Árbol de ejecución:** `trace_id`, `span_id` y `parent_span_id` para reconstruir la relación entre agentes y subagentes.
-- **Salidas observables y artefactos:** Mensajes de consola (stdout/stderr), diffs de código y hashes SHA-256 de archivos creados.
-- **Errores:** Códigos de fallo, excepciones y códigos de salida.
-
----
-
-## Resiliencia y Privacidad (Local-First)
-
-- **Redacci?n de patrones conocidos:** El motor de redacción (`redact()`) filtra automáticamente tokens Bearer, contraseñas, claves privadas y patrones de claves API (`sk-*`, `rt_*`, `ghp_*`, etc.) antes de persistir nada a disco o enviarlo a la red.
-- **Tolerancia a cortes (`DEVFLIGHT_OFFLINE=1`):** Si se pierde la conexión o el desarrollador trabaja en un entorno cerrado (como una red de pruebas offline), los eventos se acumulan de forma segura en disco con `fsync` y bloqueos de proceso (`file_lock`). Al restablecer la conectividad, `fme-trace sync` transfiere los lotes con identificadores de deduplicación estables sin duplicar registros.
-
----
-
-## Consultas SQL de Ejemplo en RawTree
-
-Una vez en RawTree, los datos quedan disponibles para auditoría directa sin necesidad de modelos de IA:
-
-```sql
--- 1. Consumo total de tokens y peticiones por modelo
-SELECT 
-    JSONExtractString(__raw_data, 'model') AS model_name,
-    count() AS total_requests,
-    sum(toUInt64OrZero(JSONExtractString(__raw_data, 'prompt_tokens'))) AS total_prompt_tokens
-FROM dev_events_raw
-WHERE event_type = 'llm.response'
-GROUP BY model_name
-ORDER BY total_prompt_tokens DESC;
-
--- 2. Detección de picos temporales de actividad de agentes
-SELECT 
-    toStartOfHour(parseDateTimeBestEffort(timestamp)) AS hour_window,
-    count() AS event_count,
-    uniqExact(JSONExtractString(__raw_data, 'agent')) AS active_agents
-FROM dev_events_raw
-GROUP BY hour_window
-ORDER BY hour_window DESC;
-
--- 3. Tasa de errores por desarrollador o sesión
-SELECT 
-    JSONExtractString(__raw_data, 'developer_id') AS developer,
-    countIf(event_type = 'error') AS total_errors,
-    count() AS total_events
-FROM dev_events_raw
-GROUP BY developer;
-```
-
----
-
-## Documentación Relacionada
-
-- [Visión completa de Observabilidad con RawTree](documentation/OBSERVABILIDAD_AGENTES_RAWTREE.md)
-- [Contexto del reto Qualcomm](documentation/RETO_QUALCOMM_CONTEXTO.md)
-- [Enunciado del reto RawTree](documentation/RAWTREE_SIDE_CHALLENGE.md)
-- [Adaptadores de telemetría y OTLP](documentation/ADAPTERS.md)
-- [Guion de Demo de 3 minutos](documentation/DEMO.md)
-- [Validación técnica y pruebas](documentation/VALIDATION.md)
+`integrations` tiene alcance diagnóstico limitado: `configured` detecta ajustes para el puerto predeterminado 8787 y el entorno del proceso; `emitting` identifica coincidencias históricas de nombre en la cola, no un heartbeat. Los alias y las versiones concretas requieren validación con cada proveedor. Las identidades de un sobre OTLP ambiguo se omiten; los atributos originales por recurso/log/span/datapoint permanecen disponibles para distinguir sesiones.

@@ -106,8 +106,13 @@ def codex_overrides(port):
         f"otel.exporter={{otlp-http={{endpoint='{base}/v1/logs',protocol='json'}}}}",
         "otel.log_user_prompt=false",
     ]
-    if os.getenv("DEVFLIGHT_CAPTURE_PROFILE", "essential") in ("detailed", "debug"):
+    profile = os.getenv("DEVFLIGHT_CAPTURE_PROFILE", "essential")
+    if profile not in ("essential", "detailed", "debug"):
+        raise ValueError("DEVFLIGHT_CAPTURE_PROFILE must be essential, detailed or debug")
+    if profile in ("detailed", "debug"):
         overrides.append(f"otel.trace_exporter={{otlp-http={{endpoint='{base}/v1/traces',protocol='json'}}}}")
+    else:
+        overrides.append("otel.trace_exporter='none'")
     return overrides
 
 
@@ -146,15 +151,31 @@ def remote_status():
     except Exception as exc:
         print(f"[WARNING] RawTree connection unavailable ({type(exc).__name__}).")
         return
-    for table in ("dev_logs", "dev_traces", "dev_metrics", "dev_events_raw"):
+    for table, column in (("dev_logs", "timeUnixNano"), ("dev_traces", "startTimeUnixNano"),
+                          ("dev_metrics", "timeUnixNano"), ("dev_events_raw", "timestamp")):
         try:
+            predicate = ("timestamp >= now() - INTERVAL 30 MINUTE" if column == "timestamp" else
+                         f"toUInt64OrZero(toString({column})) >= toUInt64(toUnixTimestamp(now() - INTERVAL 30 MINUTE)) * 1000000000")
             rows = client.query(
                 f"SELECT count() AS recent_rows FROM {table} "
-                "WHERE timestamp >= now() - INTERVAL 30 MINUTE")
+                f"WHERE {predicate}")
         except Exception as exc:
             message = str(exc).lower()
-            if "not found" in message or "does not exist" in message or "unknown table" in message:
+            if isinstance(exc, urllib.error.HTTPError):
+                # Read only a bounded error body for classification; never print it.
+                message += " " + exc.read(4096).decode("utf-8", "replace").lower()
+            if "unknown table" in message or "table" in message and any(s in message for s in ("not found", "does not exist")):
                 print(f"[RawTree] {table}: table not created yet")
+            elif any(s in message for s in ("unknown identifier", "unknown column", "missing column", "no such column")):
+                try:
+                    total = client.query(f"SELECT count() AS total_rows FROM {table}")
+                    count = total[0].get("total_rows", 0) if total else 0
+                    print(f"[RawTree] {table}: {count} total rows; recent activity unavailable (timestamp schema differs)")
+                except Exception as fallback:
+                    print(f"[WARNING] {table}: count unavailable ({type(fallback).__name__}).")
+            elif isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)) and not isinstance(exc, urllib.error.HTTPError):
+                print(f"[WARNING] RawTree connection unavailable ({type(exc).__name__}).")
+                break
             else:
                 print(f"[WARNING] {table}: query failed ({type(exc).__name__}).")
             continue
@@ -168,9 +189,9 @@ def show_status(port):
     health = get_health(port)
     print("[Collector] " + ("running" if health else "not running"))
     print("[Queue] " + json.dumps({
-        "total": queue_status.get("total"),
-        "pending": queue_status.get("pending"),
-        "last_error": queue_status.get("last_error"),
+        key: queue_status.get(key) for key in (
+            "total", "pending", "last_error", "disk_bytes", "last_sync",
+            "batches_sent", "retries", "dropped", "ingest_seconds")
     }, ensure_ascii=False))
     if STATE_PATH.exists():
         try:

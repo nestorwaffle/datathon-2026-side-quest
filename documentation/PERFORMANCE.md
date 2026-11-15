@@ -17,3 +17,28 @@ Los 20 tests existentes y las pruebas añadidas cubren cinco clientes HTTP concu
 ## Operación
 
 Configurar el exportador oficial de cada agente una vez y reiniciar sus sesiones. Codex: [referencia de configuración](https://developers.openai.com/docs/config-file/config-reference). Claude Code: [variables OTEL admitidas](https://code.claude.com/docs/en/monitoring-usage). El servicio recibe varias sesiones simultáneas, pero la atribución de proveedor, modelo, desarrollador y sesión depende de los atributos emitidos por el agente; los valores ausentes no se inventan.
+
+## Cierre de fase 1
+
+35 pruebas locales aprobadas (9,212 s). El ciclo real aislado de HTTP comprueba arranque, ingesta, parada autenticada y reinicio sin pérdida. La verificación remota ha confirmado ocho eventos y restauración exacta de un artefacto en RawTree; no es una prueba de rendimiento de modelos.
+
+La sincronización ya no reconstruye la lista pendiente por cada lote: usa un mapa ordenado y un cursor en la instantánea del ciclo. El historial todavía se lee una vez al sincronizar y reconciliar al iniciar. El estado confirmado utiliza un cursor y solo mantiene identificadores dispersos heredados hasta cerrar sus huecos. Se registra el tiempo acumulado de ingesta y los reintentos.
+
+DEVFLIGHT_MAX_QUEUE_BYTES permite aplicar backpressure sin borrar históricos: al alcanzar el límite de JSONL/segmentos se devuelve 503. El valor 0 conserva la política anterior sin límite. No incluye logs ni manifiestos y no representa retención automática. Se conserva fsync antes de confirmar captura para no perder eventos confirmados.
+
+MCP RawTree: 11.215 spans históricos y 11.215 pares de IDs distintos, 935 traceId; cero recientes en la ventana consultada de 30 minutos. Las dos operaciones más frecuentes son fs.get_metadata (3.633) y fs.read_file (2.663). Esto muestra ruido interno, no duplicación demostrada. Essential desactiva explícitamente el exportador de trazas en Codex; no se descartan errores de lotes aceptados mediante sampling.
+
+## Comparación controlada del cierre
+
+`scripts/benchmark_queue.py`, 200 eventos sintéticos de la misma forma, un solo productor, sin red, 20 lecturas de status. Baseline: core.py del commit e6bc91a; después: core.py de esta entrega. Ejecuciones individuales en el mismo entorno, no un estudio estadístico.
+
+| Métrica | Baseline | Después |
+|---|---:|---:|
+| Escritura de 200 eventos | 1,4480 s | 1,4626 s |
+| CPU total | 0,9375 s | 0,8438 s |
+| Status medio | 0,4000 ms | 0,3082 ms |
+| JSONL | 135.582 bytes | 135.582 bytes |
+| Eventos pendientes íntegros | 200 | 200 |
+| Transferencia de red | 0 | 0 |
+
+No se observa una aceleración de escritura en esta pequeña muestra; el control de recuperación adicional tiene coste. No se ha eliminado fsync para obtener una mejora artificial. El cambio principal corrige pérdida tras checkpoint/manifiesto interrumpido y reduce recorridos por lote. Sin una prueba interactiva de Codex no se certifica sobrecarga imperceptible.

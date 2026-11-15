@@ -149,18 +149,49 @@ class Queue:
             self._recover()
             return self._read()
 
+    def _tail_sequence(self):
+        """Read only the final complete envelope, even if metadata commit was interrupted."""
+        if not self.active.exists() or not self.active.stat().st_size:
+            return 0
+        with self.active.open("rb") as stream:
+            stream.seek(0, 2)
+            position = stream.tell()
+            tail = b""
+            while position and tail.count(b"\n") < 2:
+                size = min(position, 8192)
+                position -= size
+                stream.seek(position)
+                tail = stream.read(size) + tail
+            return json.loads(tail.rstrip(b"\n").rsplit(b"\n", 1)[-1])["sequence"]
+
+    def reconcile(self):
+        """Repair a stale sequence checkpoint once when a collector restarts."""
+        with file_lock(self.home / "queue.lock"):
+            self._recover()
+            sequence = max((e["sequence"] for e in self._read()), default=0)
+            atomic_json(self.home / "sequence.json", {"sequence": sequence})
+            self._sequence_ready = True
+
+    def disk_bytes(self):
+        return sum(p.stat().st_size for p in self.home.glob("*.jsonl*") if p.is_file())
+
     def append(self, event):
         with file_lock(self.home / "queue.lock"):
             self._recover()
             sequence_path = self.home / "sequence.json"
             if sequence_path.exists() and self._sequence_ready:
-                sequence = json.loads(sequence_path.read_text(encoding="utf-8"))["sequence"]
+                sequence = max(json.loads(sequence_path.read_text(encoding="utf-8"))["sequence"], self._tail_sequence())
             else:
                 sequence = max((e["sequence"] for e in self._read()), default=0)
                 self._sequence_ready = True
             event = redact(event)
             event["sequence"] = sequence + 1
             raw = (json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n").encode()
+            cap = int(os.getenv("DEVFLIGHT_MAX_QUEUE_BYTES", "0"))
+            if cap < 0:
+                raise ValueError("DEVFLIGHT_MAX_QUEUE_BYTES must be nonnegative")
+            if cap and self.disk_bytes() + len(raw) > cap:
+                raise OSError("Queue storage limit reached; retry after archival or increasing DEVFLIGHT_MAX_QUEUE_BYTES")
             with self.active.open("ab") as f:
                 f.write(raw); f.flush(); os.fsync(f.fileno())
             atomic_json(sequence_path, {"sequence": event["sequence"]})
@@ -193,7 +224,7 @@ class Queue:
         sequence_path = self.home / "sequence.json"
         if sequence_path.exists():
             total = json.loads(sequence_path.read_text(encoding="utf-8"))["sequence"]
-            acknowledged = state.get("acked_sequence", len(state.get("acked", [])))
+            acknowledged = state.get("acked_sequence", 0) + len(state.get("acked", []))
             pending_count = max(0, total - acknowledged)
             oldest = state.get("oldest_pending") if pending_count else None
         else:
@@ -204,7 +235,8 @@ class Queue:
             pending_count = len(pending)
             oldest = pending[0]["timestamp"] if pending else None
         age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(oldest)).total_seconds() if oldest else 0
-        disk_bytes = sum(p.stat().st_size for p in self.home.glob("*.jsonl*"))
+        with file_lock(self.home / "queue.lock"):
+            disk_bytes = self.disk_bytes()
         return {"total": total, "pending": pending_count, "oldest": oldest,
                 "age_seconds": age, "last_error": state.get("last_error"), "home": str(self.home),
                 "disk_bytes": disk_bytes, "last_sync": state.get("last_sync"),

@@ -49,6 +49,8 @@ class RawTree:
         return [json.loads(r["event"]) for r in self.query(sql)], sql
 
 def sync(queue, client=None, attempts=3):
+    if attempts < 1:
+        raise ValueError("attempts must be positive")
     if os.getenv("DEVFLIGHT_OFFLINE") == "1":
         return {**queue.status(), "offline": True}
     client = client or RawTree()
@@ -65,17 +67,21 @@ def sync(queue, client=None, attempts=3):
             state["acked_sequence"] = cursor
             state["acked"] = list(legacy - {e["event_id"] for e in rows_snapshot if e["sequence"] <= cursor})
         manifest = queue.home / "batch.json"
+        acknowledged = set(state.get("acked", []))
+        pending = {e["event_id"]: e for e in rows_snapshot
+                   if e["sequence"] > state["acked_sequence"] and e["event_id"] not in acknowledged}
+        position = 0
+        while position < len(rows_snapshot) and rows_snapshot[position]["sequence"] <= state["acked_sequence"]:
+            position += 1
         while True:
             if manifest.exists():
                 batch = json.loads(manifest.read_text(encoding="utf-8"))
             else:
-                acked = set(state.get("acked", []))
-                pending = [e for e in rows_snapshot if e["sequence"] > state["acked_sequence"] and e["event_id"] not in acked]
                 if not pending:
                     break
-                artifact = pending[0]["event_type"].startswith("artifact.")
+                artifact = next(iter(pending.values()))["event_type"].startswith("artifact.")
                 rows = []
-                for event in pending:
+                for event in pending.values():
                     if event["event_type"].startswith("artifact.") != artifact or len(rows) == 100:
                         break
                     rows.append(event)
@@ -83,6 +89,7 @@ def sync(queue, client=None, attempts=3):
                 token = hashlib.sha256((table + ":" + ":".join(e["event_id"] for e in rows)).encode()).hexdigest()
                 batch = {"table": table, "events": rows, "deduplication_id": token}
                 atomic_json(manifest, batch)
+            batch_started = time.perf_counter()
             for attempt in range(attempts):
                 try:
                     # OTLP is already represented by native signal tables. Keep its
@@ -114,12 +121,24 @@ def sync(queue, client=None, attempts=3):
                     if attempt + 1 == attempts:
                         raise
                     time.sleep(min(2 ** attempt, 8))
-            state["acked_sequence"] = max(state["acked_sequence"], max(e["sequence"] for e in batch["events"]))
-            state["acked"] = [identifier for identifier in state.get("acked", [])
-                              if identifier not in {e["event_id"] for e in batch["events"]}]
+            # Older manifests grouped artifacts across sequence gaps. Only advance
+            # past a contiguous acknowledged prefix; max(batch) could lose a gap.
+            acknowledged.update(e["event_id"] for e in batch["events"] if e["sequence"] > state["acked_sequence"])
+            for event in batch["events"]:
+                pending.pop(event["event_id"], None)
+            while position < len(rows_snapshot):
+                event = rows_snapshot[position]
+                if event["event_id"] not in acknowledged:
+                    break
+                state["acked_sequence"] = event["sequence"]
+                acknowledged.discard(event["event_id"])
+                position += 1
+            state["acked"] = sorted(acknowledged)
+            state["oldest_pending"] = next(iter(pending.values()))["timestamp"] if pending else None
             state["last_error"] = None
             state["last_sync"] = dt.datetime.now(dt.timezone.utc).isoformat()
             state["batches_sent"] = state.get("batches_sent", 0) + 1
+            state["ingest_seconds"] = state.get("ingest_seconds", 0) + time.perf_counter() - batch_started
             atomic_json(queue.home / "sync.json", state)
             manifest.unlink()
     return queue.status()

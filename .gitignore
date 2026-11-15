@@ -8,3 +8,5 @@ data/private/
 output/
 tmp/
 api_keys.txt
+*.pptx.inspect.ndjson
+*.bak

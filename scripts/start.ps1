@@ -14,4 +14,4 @@ $projectPython = Join-Path (Get-Location) '.venv/Scripts/python.exe'
 if (-not (Test-Path -LiteralPath $projectPython)) {
     throw 'Primero crea .venv e instala el proyecto siguiendo README.md.'
 }
-& $projectPython -m devflight --home .devflight/telemetry collect --port $Port
+& $projectPython start_devflight.py start --port $Port

@@ -5,6 +5,8 @@ from pathlib import Path
 import tomllib
 import shutil
 import time
+import secrets
+from urllib.parse import urlsplit
 
 REGISTRY = {
     "codex": {"transport": "OTLP/HTTP JSON", "config": "~/.codex/config.toml", "default_signals": "logs"},
@@ -30,7 +32,11 @@ def report(queue=None):
     codex_exporter = codex.get("otel", {}).get("exporter", {})
     codex_endpoint = str(codex_exporter.get("otlp-http", {}).get("endpoint", "")) if isinstance(codex_exporter, dict) else ""
     def local(endpoint):
-        return "127.0.0.1:8787" in str(endpoint) or "localhost:8787" in str(endpoint)
+        try:
+            parsed = urlsplit(str(endpoint))
+            return parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost") and parsed.port == 8787
+        except ValueError:
+            return False
     configured = {
         "codex": local(codex_endpoint),
         "claude_code": local(os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")),
@@ -65,7 +71,7 @@ def configure(provider, port=8787):
         if tomllib.loads(current).get("otel"):
             raise ValueError("Existing Codex OTEL settings require manual merge; no file changed")
         proposed = current.rstrip() + ("\n\n" if current.strip() else "") + (
-            "[otel]\nlog_user_prompt = false\n"
+            "[otel]\nlog_user_prompt = false\ntrace_exporter = 'none'\n"
             f"exporter = {{ otlp-http = {{ endpoint = 'http://127.0.0.1:{port}/v1/logs', protocol = 'json' }} }}\n")
     else:
         existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -80,15 +86,19 @@ def configure(provider, port=8787):
             settings["traces"] = False
         existing["telemetry"] = settings
         proposed = json.dumps(existing, ensure_ascii=False, indent=2) + "\n"
-    print(f"Proposed {provider} settings change: {path}\n{proposed}")
+    # Never print the whole existing configuration: it may contain credentials.
+    print(f"Proposed {provider} telemetry configuration: {path}; local HTTP/JSON port {port}; prompt capture disabled")
     if input("Apply with backup? Type YES: ").strip() != "YES":
         return {"changed": False}
     path.parent.mkdir(parents=True, exist_ok=True)
     backup = None
     if path.exists():
-        backup = path.with_name(path.name + f".devflight-{int(time.time())}.bak")
+        backup = path.with_name(path.name + f".devflight-{time.time_ns()}-{secrets.token_hex(4)}.bak")
         shutil.copy2(path, backup)
-    temp = path.with_name(path.name + ".devflight.tmp")
-    temp.write_text(proposed, encoding="utf-8")
+    temp = path.with_name(path.name + ".devflight-" + secrets.token_hex(8) + ".tmp")
+    with temp.open("x", encoding="utf-8") as stream:
+        stream.write(proposed)
+        stream.flush()
+        os.fsync(stream.fileno())
     os.replace(temp, path)
     return {"changed": True, "backup": str(backup) if backup else None}

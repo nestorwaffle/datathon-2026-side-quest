@@ -13,18 +13,65 @@ from .rawtree import sync
 LIMIT = 4 * 1024 * 1024
 
 def otlp_identity(body, field):
-    resources = body.get(field, [])
+    """Promote only explicit, unambiguous identities from known OTLP locations."""
+    aliases = {
+        "service.name": "service.name",
+        "gen_ai.provider.name": "gen_ai.system", "gen_ai.system": "gen_ai.system",
+        "gen_ai.request.model": "gen_ai.request.model", "model": "gen_ai.request.model",
+        "session.id": "session.id", "conversation.id": "session.id",
+        "developer.id": "developer.id", "developer_id": "developer.id",
+    }
     values = {}
-    for item in resources:
-        attrs = item.get("resource", {}).get("attributes", [])
-        found = {a.get("key"): next(iter(a.get("value", {}).values()), None)
-                 for a in attrs if isinstance(a, dict) and isinstance(a.get("value"), dict)}
-        for key in ("service.name", "gen_ai.system", "gen_ai.request.model", "session.id", "developer.id"):
-            if found.get(key) is not None:
-                values.setdefault(key, set()).add(str(found[key]))
+    def collect(node):
+        if not isinstance(node, dict):
+            return
+        attrs = node.get("attributes", [])
+        if not isinstance(attrs, list):
+            return
+        for attribute in attrs:
+            if not isinstance(attribute, dict):
+                continue
+            key = attribute.get("key")
+            if not isinstance(key, str) or key not in aliases:
+                continue
+            value = attribute.get("value")
+            # Never stringify nested JSON/AnyValues into a fabricated identity.
+            text = value.get("stringValue") if isinstance(value, dict) else None
+            if isinstance(text, str) and text:
+                values.setdefault(aliases[key], set()).add(text)
+
+    scopes, records = {
+        "resourceLogs": (("scopeLogs", "instrumentationLibraryLogs"), "logRecords"),
+        "resourceSpans": (("scopeSpans", "instrumentationLibrarySpans"), "spans"),
+        "resourceMetrics": (("scopeMetrics", "instrumentationLibraryMetrics"), "metrics"),
+    }.get(field, ((), ""))
+    resources = body.get(field, [])
+    for item in resources if isinstance(resources, list) else []:
+        if not isinstance(item, dict):
+            continue
+        collect(item.get("resource"))
+        for scope_key in scopes:
+            scope_list = item.get(scope_key, [])
+            for scope in scope_list if isinstance(scope_list, list) else []:
+                if not isinstance(scope, dict):
+                    continue
+                collect(scope.get("scope"))
+                record_list = scope.get(records, [])
+                for record in record_list if isinstance(record_list, list) else []:
+                    if not isinstance(record, dict):
+                        continue
+                    if field != "resourceMetrics":
+                        collect(record)
+                    else:
+                        for kind in ("gauge", "sum", "histogram", "exponentialHistogram", "summary"):
+                            metric = record.get(kind, {})
+                            points = metric.get("dataPoints", []) if isinstance(metric, dict) else []
+                            for point in points if isinstance(points, list) else []:
+                                collect(point)
     return {k: next(iter(v)) for k, v in values.items() if len(v) == 1}
 
 def make_server(queue, port=8787):
+    queue.reconcile()
     slots = threading.BoundedSemaphore(32)
     control_path = queue.home / "control.key"
     if control_path.exists():
@@ -34,8 +81,14 @@ def make_server(queue, port=8787):
         try:
             with control_path.open("x", encoding="ascii") as stream:
                 stream.write(control_key)
+                stream.flush()
+                os.fsync(stream.fileno())
         except FileExistsError:
             control_key = control_path.read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[a-f0-9]{64}", control_key):
+        raise ValueError("Invalid control.key; refusing unauthenticated shutdown. Preserve the file and restore a valid control key.")
+    if os.name != "nt":
+        control_path.chmod(0o600)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
 
@@ -124,7 +177,12 @@ def make_server(queue, port=8787):
                 trace.developer_id = identity.get("developer.id")
                 trace.emit("otel."+signal,body)
                 self.reply(200,{})
-            except (ValueError, TypeError, KeyError, OSError) as error:
+            except OSError:
+                self.send_response(503)
+                self.send_header("Retry-After", "5")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except (ValueError, TypeError, KeyError) as error:
                 self.reply(400,{"error":str(error)})
             finally:
                 slots.release()
